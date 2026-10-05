@@ -134,6 +134,61 @@ The first installation of this partition layout must still be flashed over USB b
 
 Flash the complete CI artifact once using its generated `flash_args` / `flasher_args.json`. After that, routine application updates only need `bandic5.bin` through the phone update page.
 
+## v0.3 optional uplink monitoring
+
+BandiC5 can optionally join one saved Wi-Fi access point during normal scouting and expose a read-only live status page on that LAN.
+
+The uplink is deliberately separate from the maintenance/update AP:
+
+- normal operation remains Wi-Fi STA + RF scouting
+- the saved uplink is optional; missing credentials leave BandiC5 in scout-only mode
+- if the uplink disappears, RF scanning continues and reconnect attempts are throttled
+- the existing physical BOOT gesture still switches the radio into the dedicated `BandiC5-Update` AP for OTA/recovery/configuration
+- BandiC5 does **not** run its maintenance SoftAP and infrastructure STA simultaneously
+
+### Configure an uplink
+
+1. Run the desired v0.3 firmware.
+2. Hold **BOOT** for about 2 seconds during normal operation.
+3. Join `BandiC5-Update` with password `bandic5ota`.
+4. Open `http://192.168.4.1`.
+5. In **Uplink Wi-Fi**, enter the hotspot/router SSID and password.
+6. Tap **Save Wi-Fi & reboot**.
+7. After reboot BandiC5 performs its first RF scan, then attempts the saved uplink during the inter-scan idle window.
+
+Leaving the SSID blank and saving clears the stored uplink configuration.
+
+Credentials are stored in the ESP32-C5 NVS partition and are not written to the TF session CSV files or repository.
+
+### Monitor BandiC5
+
+When the STA receives an IP address:
+
+- the dashboard shows a compact globe indicator: green while connected, gray while configured/disconnected, hidden when uplink is disabled
+- the dashboard subtitle changes to the assigned numeric IP while connected
+- serial logs report the SSID and assigned IP
+- BandiC5 advertises the mDNS hostname `bandic5`
+- the read-only status page is available at `http://bandic5.local/` when the LAN supports mDNS
+- the numeric DHCP address from the serial log/router remains the fallback
+
+The browser dashboard refreshes live status every two seconds and reports:
+
+- firmware version
+- uplink connection/IP
+- 2.4 GHz and 5 GHz AP counts
+- strongest observed AP, RSSI, and channel
+- total/open/hidden counts and scan generation
+- TF logging state
+- uptime
+
+A JSON representation is also available at `/status.json`.
+
+Some hotspot implementations isolate connected clients from the hotspot host or from one another. In that case BandiC5 can still join the hotspot for connectivity, but direct browser monitoring from the isolated device may not work. A normal LAN/travel router without client isolation is the most predictable monitoring setup.
+
+### Single-radio behavior
+
+The ESP32-C5 has one Wi-Fi radio. Active dual-band scouting temporarily visits channels away from the associated AP. BandiC5 explicitly uses Espressif's home-channel dwell between scan channels to help preserve the infrastructure connection, but brief latency during scans is expected. Uplink monitoring is intentionally low-bandwidth and read-only.
+
 ## Build
 
 The project targets **ESP-IDF v5.5.5** and **esp32c5**.
