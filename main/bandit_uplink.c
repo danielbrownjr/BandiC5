@@ -531,7 +531,7 @@ static esp_err_t start_status_server(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = BANDIT_UPLINK_HTTP_STACK;
-    config.max_uri_handlers = 3;
+    config.max_uri_handlers = 5;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -550,10 +550,34 @@ static esp_err_t start_status_server(void)
         .method = HTTP_GET,
         .handler = status_json_handler,
     };
+    httpd_uri_t aps = {
+        .uri = "/aps.json",
+        .method = HTTP_GET,
+        .handler = aps_json_handler,
+    };
+    httpd_uri_t logs = {
+        .uri = "/logs.json",
+        .method = HTTP_GET,
+        .handler = logs_json_handler,
+    };
+    httpd_uri_t download = {
+        .uri = "/download",
+        .method = HTTP_GET,
+        .handler = download_handler,
+    };
 
     ret = httpd_register_uri_handler(s_server, &root);
     if (ret == ESP_OK) {
         ret = httpd_register_uri_handler(s_server, &status);
+    }
+    if (ret == ESP_OK) {
+        ret = httpd_register_uri_handler(s_server, &aps);
+    }
+    if (ret == ESP_OK) {
+        ret = httpd_register_uri_handler(s_server, &logs);
+    }
+    if (ret == ESP_OK) {
+        ret = httpd_register_uri_handler(s_server, &download);
     }
 
     if (ret != ESP_OK) {
@@ -727,6 +751,13 @@ esp_err_t bandit_uplink_clear_credentials(void)
 
 esp_err_t bandit_uplink_init(void)
 {
+    if (!s_ap_mutex) {
+        s_ap_mutex = xSemaphoreCreateMutex();
+        if (!s_ap_mutex) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     char password[64] = {0};
     char ssid[33] = {0};
 
@@ -873,10 +904,63 @@ void bandit_uplink_stop(void)
     portEXIT_CRITICAL(&s_state_mux);
 }
 
+void bandit_uplink_begin_scan(void)
+{
+    s_work_ap_count = 0;
+    s_work_seen = 0;
+}
+
+void bandit_uplink_observe_record(const bandit_scan_record_t *record)
+{
+    if (!record) {
+        return;
+    }
+
+    s_work_seen++;
+
+    if (s_work_ap_count < BANDIT_UPLINK_AP_CACHE_MAX) {
+        s_work_aps[s_work_ap_count++] = *record;
+        return;
+    }
+
+    // Keep the strongest bounded set if a dense environment exceeds the
+    // browser cache capacity.
+    size_t weakest = 0;
+    for (size_t i = 1; i < s_work_ap_count; i++) {
+        if (s_work_aps[i].rssi < s_work_aps[weakest].rssi) {
+            weakest = i;
+        }
+    }
+
+    if (record->rssi > s_work_aps[weakest].rssi) {
+        s_work_aps[weakest] = *record;
+    }
+}
+
 void bandit_uplink_publish_snapshot(const bandit_scan_snapshot_t *snapshot)
 {
     if (!snapshot) {
         return;
+    }
+
+    qsort(
+        s_work_aps,
+        s_work_ap_count,
+        sizeof(s_work_aps[0]),
+        compare_ap_rssi_desc
+    );
+
+    if (s_ap_mutex &&
+        xSemaphoreTake(s_ap_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        s_published_ap_count = s_work_ap_count;
+        s_published_generation = snapshot->generation;
+        s_published_truncated = s_work_seen > s_work_ap_count;
+        memcpy(
+            s_published_aps,
+            s_work_aps,
+            s_work_ap_count * sizeof(s_work_aps[0])
+        );
+        xSemaphoreGive(s_ap_mutex);
     }
 
     portENTER_CRITICAL(&s_state_mux);
