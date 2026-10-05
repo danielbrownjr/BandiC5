@@ -1,10 +1,6 @@
 name: ESP-IDF CI
 
 on:
-  push:
-    branches:
-      - main
-      - "feat/**"
   pull_request:
     branches:
       - main
@@ -12,6 +8,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: bandic5-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
