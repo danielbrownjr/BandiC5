@@ -61,6 +61,8 @@ static void wait_for_next_scan_or_ota(void)
             return;
         }
 
+        bandit_uplink_service();
+
         int delay_ms = remaining_ms < OTA_REQUEST_POLL_MS
             ? remaining_ms
             : OTA_REQUEST_POLL_MS;
