@@ -103,13 +103,37 @@ static void ota_button_task(void *arg)
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    ESP_LOGI(
+        TAG,
+        "HTTP root request, stack high water=%u",
+        (unsigned)uxTaskGetStackHighWaterMark(NULL)
+    );
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, s_update_page, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t probe_get_handler(httpd_req_t *req)
+{
+    ESP_LOGI(
+        TAG,
+        "HTTP probe %s, stack high water=%u",
+        req->uri,
+        (unsigned)uxTaskGetStackHighWaterMark(NULL)
+    );
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, "", 0);
+}
+
 static esp_err_t update_post_handler(httpd_req_t *req)
 {
+    ESP_LOGI(
+        TAG,
+        "HTTP OTA upload start, stack high water=%u",
+        (unsigned)uxTaskGetStackHighWaterMark(NULL)
+    );
+
     if (req->content_len == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty firmware image");
         return ESP_FAIL;
@@ -319,8 +343,9 @@ esp_err_t bandit_ota_start(void)
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     // Keep OTA buffers off this task's stack, and retain extra headroom for
     // HTTP parsing, Wi-Fi/TCP callbacks, and response handling.
-    server_config.stack_size = 10240;
+    server_config.stack_size = 12288;
     server_config.max_uri_handlers = 4;
+    server_config.uri_match_fn = httpd_uri_match_wildcard;
 
     ret = httpd_start(&s_server, &server_config);
     if (ret != ESP_OK) {
@@ -342,12 +367,24 @@ esp_err_t bandit_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t probe = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = probe_get_handler,
+        .user_ctx = NULL,
+    };
+
     ret = httpd_register_uri_handler(s_server, &root);
     if (ret != ESP_OK) {
         return ret;
     }
 
     ret = httpd_register_uri_handler(s_server, &update);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = httpd_register_uri_handler(s_server, &probe);
     if (ret != ESP_OK) {
         return ret;
     }
