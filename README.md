@@ -61,6 +61,20 @@ The logger uses monotonic milliseconds since boot because this board has no conf
 Hot insertion/removal is not supported yet. Card state is established at boot, and runtime write/flush failures move the storage indicator to the error state.
 
 
+### TF hot-plug recovery
+
+Starting with **v0.2.5 SD HOTPLUG**, storage can recover after card removal and reinsertion:
+
+- a write or flush failure tears down the stale FAT mount instead of leaving the logger permanently stuck in `ERROR`
+- BandiC5 keeps RF scanning while storage is unavailable
+- the storage service retries mounting every few seconds
+- a successful reinsertion creates a **new numbered session CSV**
+- the dashboard badge returns to green `SD` automatically
+- a missing/unmountable card shows gray `--`
+- a mounted card with a filesystem/open failure remains red `!!`
+
+Because the board exposes no card-detect GPIO through the current Waveshare BSP, hot-plug detection is software-driven from I/O failure plus periodic remount attempts.
+
 ## Phone OTA updates
 
 This build is designed to be the last routine USB flash.
