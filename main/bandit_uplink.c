@@ -144,6 +144,20 @@ static void json_escape(const char *src, char *dst, size_t dst_size)
     dst[out] = '\0';
 }
 
+static int compare_ap_rssi_desc(const void *left, const void *right)
+{
+    const bandit_scan_record_t *a = left;
+    const bandit_scan_record_t *b = right;
+
+    if (a->rssi > b->rssi) {
+        return -1;
+    }
+    if (a->rssi < b->rssi) {
+        return 1;
+    }
+    return strcmp(a->ssid, b->ssid);
+}
+
 static const char *storage_state_name(void)
 {
     switch (bandit_storage_get_state()) {
@@ -242,6 +256,270 @@ static esp_err_t status_json_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t ret = httpd_resp_send(req, json, written);
     free(json);
+    return ret;
+}
+
+static esp_err_t aps_json_handler(httpd_req_t *req)
+{
+    if (!s_ap_mutex) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "AP cache unavailable");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bandit_scan_record_t *records = malloc(
+        BANDIT_UPLINK_AP_CACHE_MAX * sizeof(*records)
+    );
+    if (!records) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t count = 0;
+    uint32_t generation = 0;
+    bool truncated = false;
+
+    if (xSemaphoreTake(s_ap_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        free(records);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "AP cache busy");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    count = s_published_ap_count;
+    generation = s_published_generation;
+    truncated = s_published_truncated;
+    memcpy(records, s_published_aps, count * sizeof(*records));
+    xSemaphoreGive(s_ap_mutex);
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char chunk[384];
+    int written = snprintf(
+        chunk,
+        sizeof(chunk),
+        "{\"scan\":%lu,\"truncated\":%s,\"aps\":[",
+        (unsigned long)generation,
+        truncated ? "true" : "false"
+    );
+    if (written < 0 || written >= (int)sizeof(chunk)) {
+        free(records);
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = httpd_resp_send_chunk(req, chunk, written);
+    for (size_t i = 0; ret == ESP_OK && i < count; i++) {
+        const bandit_scan_record_t *record = &records[i];
+        char escaped_ssid[70];
+        char escaped_auth[30];
+        char bssid[18];
+
+        json_escape(record->ssid, escaped_ssid, sizeof(escaped_ssid));
+        json_escape(record->auth, escaped_auth, sizeof(escaped_auth));
+        snprintf(
+            bssid,
+            sizeof(bssid),
+            "%02X:%02X:%02X:%02X:%02X:%02X",
+            record->bssid[0],
+            record->bssid[1],
+            record->bssid[2],
+            record->bssid[3],
+            record->bssid[4],
+            record->bssid[5]
+        );
+
+        written = snprintf(
+            chunk,
+            sizeof(chunk),
+            "%s{\"ssid\":\"%s\",\"bssid\":\"%s\",\"rssi\":%d,"
+            "\"channel\":%u,\"band\":\"%s\",\"auth\":\"%s\",\"hidden\":%s}",
+            i ? "," : "",
+            escaped_ssid,
+            bssid,
+            record->rssi,
+            record->channel,
+            record->channel > 14 ? "5 GHz" : "2.4 GHz",
+            escaped_auth,
+            record->hidden ? "true" : "false"
+        );
+
+        if (written < 0 || written >= (int)sizeof(chunk)) {
+            ret = ESP_FAIL;
+            break;
+        }
+
+        ret = httpd_resp_send_chunk(req, chunk, written);
+    }
+
+    if (ret == ESP_OK) {
+        ret = httpd_resp_send_chunk(req, "]}", 2);
+    }
+    if (ret == ESP_OK) {
+        ret = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    free(records);
+    return ret;
+}
+
+static esp_err_t logs_json_handler(httpd_req_t *req)
+{
+    bandit_storage_session_t *sessions = calloc(
+        BANDIT_UPLINK_SESSION_LIST_MAX,
+        sizeof(*sessions)
+    );
+    if (!sessions) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t count = 0;
+    esp_err_t list_ret = bandit_storage_list_sessions(
+        sessions,
+        BANDIT_UPLINK_SESSION_LIST_MAX,
+        &count
+    );
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    if (list_ret != ESP_OK) {
+        free(sessions);
+        return httpd_resp_sendstr(
+            req,
+            "{\"available\":false,\"sessions\":[]}"
+        );
+    }
+
+    esp_err_t ret = httpd_resp_send_chunk(
+        req,
+        "{\"available\":true,\"sessions\":[",
+        HTTPD_RESP_USE_STRLEN
+    );
+
+    char chunk[192];
+    for (size_t i = 0; ret == ESP_OK && i < count; i++) {
+        int written = snprintf(
+            chunk,
+            sizeof(chunk),
+            "%s{\"index\":%u,\"name\":\"session-%04u.csv\","
+            "\"bytes\":%zu,\"active\":%s}",
+            i ? "," : "",
+            sessions[i].index,
+            sessions[i].index,
+            sessions[i].size_bytes,
+            sessions[i].active ? "true" : "false"
+        );
+
+        if (written < 0 || written >= (int)sizeof(chunk)) {
+            ret = ESP_FAIL;
+            break;
+        }
+
+        ret = httpd_resp_send_chunk(req, chunk, written);
+    }
+
+    if (ret == ESP_OK) {
+        ret = httpd_resp_send_chunk(req, "]}", 2);
+    }
+    if (ret == ESP_OK) {
+        ret = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    free(sessions);
+    return ret;
+}
+
+static esp_err_t download_handler(httpd_req_t *req)
+{
+    size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0 || query_len >= 64) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing session index");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char query[64];
+    char value[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "session", value, sizeof(value)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid session query");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed == 0 || parsed > 9999) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid session index");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char path[96];
+    esp_err_t ret = bandit_storage_session_path(
+        (unsigned)parsed,
+        path,
+        sizeof(path)
+    );
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid session path");
+        return ret;
+    }
+
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    char disposition[64];
+    snprintf(
+        disposition,
+        sizeof(disposition),
+        "attachment; filename=\"session-%04lu.csv\"",
+        parsed
+    );
+
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
+    if (!buffer) {
+        fclose(file);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    while (1) {
+        size_t read_count = fread(
+            buffer,
+            1,
+            BANDIT_UPLINK_DOWNLOAD_BUFFER,
+            file
+        );
+
+        if (read_count > 0) {
+            ret = httpd_resp_send_chunk(req, buffer, read_count);
+            if (ret != ESP_OK) {
+                break;
+            }
+        }
+
+        if (read_count < BANDIT_UPLINK_DOWNLOAD_BUFFER) {
+            if (ferror(file)) {
+                ESP_LOGW(TAG, "read failed while downloading %s", path);
+                ret = ESP_FAIL;
+            }
+            break;
+        }
+    }
+
+    free(buffer);
+    fclose(file);
+
+    if (ret == ESP_OK) {
+        ret = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
     return ret;
 }
 
