@@ -8,6 +8,7 @@
 #include "bandit_scan.h"
 #include "bandit_storage.h"
 #include "bandit_ui.h"
+#include "bandit_version.h"
 
 #define SCAN_TASK_STACK_SIZE (8 * 1024)
 #define SCAN_INTERVAL_MS 3500
@@ -115,7 +116,7 @@ static void scan_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "BandiC5 boot");
+    ESP_LOGI(TAG, "BandiC5 %s boot", BANDIT_VERSION);
 
     esp_err_t ret = bandit_ui_init();
     if (ret != ESP_OK) {
