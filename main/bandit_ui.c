@@ -19,6 +19,7 @@ static lv_obj_t *s_summary_value;
 static lv_obj_t *s_status;
 static lv_obj_t *s_storage_status;
 static lv_obj_t *s_uplink_status;
+static lv_obj_t *s_subtitle;
 static lv_obj_t *s_ota_progress;
 static lv_obj_t *s_ota_status;
 
@@ -101,10 +102,10 @@ static void create_ui(void)
     lv_obj_set_style_text_color(s_storage_status, lv_color_hex(0x475569), 0);
     lv_obj_align(s_storage_status, LV_ALIGN_TOP_RIGHT, -6, 10);
 
-    lv_obj_t *subtitle = lv_label_create(screen);
-    lv_label_set_text(subtitle, BANDIT_VERSION);
-    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x7f8ea3), 0);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 34);
+    s_subtitle = lv_label_create(screen);
+    lv_label_set_text(s_subtitle, BANDIT_VERSION);
+    lv_obj_set_style_text_color(s_subtitle, lv_color_hex(0x7f8ea3), 0);
+    lv_obj_align(s_subtitle, LV_ALIGN_TOP_MID, 0, 34);
 
     make_band_card(
         screen,
@@ -232,6 +233,16 @@ void bandit_ui_set_uplink_state(bool connected)
         0
     );
 
+    bsp_display_unlock();
+}
+
+void bandit_ui_set_uplink_address(const char *address)
+{
+    if (!s_subtitle || !bsp_display_lock(0)) {
+        return;
+    }
+
+    lv_label_set_text(s_subtitle, (address && address[0]) ? address : BANDIT_VERSION);
     bsp_display_unlock();
 }
 
