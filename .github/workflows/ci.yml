@@ -1,0 +1,44 @@
+name: ESP-IDF CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bandic5-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ESP32-C5 firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32c5
+          path: .
+
+      - name: Upload flashable firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: BandiC5-firmware
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            build/bandic5.bin
+            build/bandic5.elf
+            build/bandic5.map
+            build/ota_data_initial.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flash_args
+            build/flasher_args.json

@@ -1,0 +1,21 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "bandit_ota.c"
+        "bandit_scan.c"
+        "bandit_storage.c"
+        "bandit_ui.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        app_update
+        esp32_c5_lcd_1_47
+        esp_driver_gpio
+        esp_http_server
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_partition
+        esp_timer
+        nvs_flash
+        lvgl
+)
