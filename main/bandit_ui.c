@@ -18,6 +18,7 @@ static lv_obj_t *s_strongest_value;
 static lv_obj_t *s_summary_value;
 static lv_obj_t *s_status;
 static lv_obj_t *s_storage_status;
+static lv_obj_t *s_uplink_status;
 static lv_obj_t *s_ota_progress;
 static lv_obj_t *s_ota_status;
 
@@ -89,6 +90,11 @@ static void create_ui(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xf8fafc), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+
+    s_uplink_status = lv_label_create(screen);
+    lv_label_set_text(s_uplink_status, "--");
+    lv_obj_set_style_text_color(s_uplink_status, lv_color_hex(0x475569), 0);
+    lv_obj_align(s_uplink_status, LV_ALIGN_TOP_LEFT, 6, 10);
 
     s_storage_status = lv_label_create(screen);
     lv_label_set_text(s_storage_status, "--");
@@ -213,6 +219,22 @@ void bandit_ui_set_storage_state(bandit_ui_storage_state_t state)
     bsp_display_unlock();
 }
 
+void bandit_ui_set_uplink_state(bool connected)
+{
+    if (!s_uplink_status || !bsp_display_lock(0)) {
+        return;
+    }
+
+    lv_label_set_text(s_uplink_status, connected ? "NET" : "--");
+    lv_obj_set_style_text_color(
+        s_uplink_status,
+        connected ? lv_color_hex(0x34d399) : lv_color_hex(0x475569),
+        0
+    );
+
+    bsp_display_unlock();
+}
+
 void bandit_ui_update(const bandit_scan_snapshot_t *snapshot)
 {
     if (!snapshot || !bsp_display_lock(0)) {
@@ -288,6 +310,7 @@ void bandit_ui_show_ota_mode(
     s_summary_value = NULL;
     s_status = NULL;
     s_storage_status = NULL;
+    s_uplink_status = NULL;
 
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "UPDATE MODE");
