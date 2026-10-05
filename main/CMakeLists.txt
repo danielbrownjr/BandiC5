@@ -5,6 +5,7 @@ idf_component_register(
         "bandit_scan.c"
         "bandit_storage.c"
         "bandit_ui.c"
+        "bandit_uplink.c"
     INCLUDE_DIRS "."
     REQUIRES
         app_update
