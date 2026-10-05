@@ -60,6 +60,34 @@ The logger uses monotonic milliseconds since boot because this board has no conf
 
 Hot insertion/removal is not supported yet. Card state is established at boot, and runtime write/flush failures move the storage indicator to the error state.
 
+
+## Phone OTA updates
+
+This build is designed to be the last routine USB flash.
+
+The 4 MB flash uses two OTA application slots plus OTA metadata. Future updates write the inactive slot, verify the image, switch the boot target, and reboot. Application rollback is enabled so a newly OTA-installed image is not accepted until the core display/radio/update-trigger path initializes successfully.
+
+To enter update mode from a normally running C5 Bandit:
+
+1. Hold the physical **BOOT** button for about 2 seconds. Do **not** hold BOOT while resetting, because that enters the ESP32-C5 ROM download bootloader instead of BandiC5 update mode.
+2. C5 Bandit closes/syncs the TF session, stops normal RF scanning, and changes its screen to **UPDATE MODE**.
+3. On the phone, join:
+   - Wi-Fi: `BandiC5-Update`
+   - Password: `bandic5ota`
+4. Open Safari to `http://192.168.4.1`.
+5. Choose the new `bandic5.bin` and upload it.
+6. Keep power connected until the device reports **REBOOTING**.
+
+The upload page streams the firmware directly into the inactive OTA slot, so it does not need enough RAM to hold the entire binary.
+
+OTA mode is intentionally local and physically initiated. It is not exposed during ordinary scanning.
+
+### First OTA-capable installation
+
+The first installation of this partition layout must still be flashed over USB because it changes the bootloader/partition-table environment.
+
+Flash the complete CI artifact once using its generated `flash_args` / `flasher_args.json`. After that, routine application updates only need `bandic5.bin` through the phone update page.
+
 ## Build
 
 The project targets **ESP-IDF v5.5.5** and **esp32c5**.
@@ -70,7 +98,7 @@ idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
-The checked-in `sdkconfig.defaults` follows Waveshare's current ESP-IDF example configuration for this board.
+The checked-in `sdkconfig.defaults` follows the Waveshare board baseline plus BandiC5's custom dual-slot OTA partition table and bootloader rollback support.
 
 ## Board resources
 
@@ -85,6 +113,7 @@ The checked-in `sdkconfig.defaults` follows Waveshare's current ESP-IDF example 
 | microSD MISO | GPIO5 |
 | microSD CS | GPIO4 |
 | WS2812B | GPIO8 |
+| BOOT / OTA request | GPIO28 |
 
 The LCD and microSD share GPIO6/GPIO7 and use separate chip-select lines.
 
