@@ -18,12 +18,14 @@
 #include "esp_wifi.h"
 
 #include "bandit_ui.h"
+#include "bandit_version.h"
 
 #define BANDIT_OTA_BOOT_GPIO GPIO_NUM_28
 #define BANDIT_OTA_HOLD_MS 2000
 #define BANDIT_OTA_POLL_MS 100
 #define BANDIT_OTA_BUTTON_TASK_STACK 3072
 #define BANDIT_OTA_RECV_BUFFER 4096
+#define BANDIT_OTA_REBOOT_DELAY_MS 4000
 
 static const char *TAG = "bandit_ota";
 
@@ -43,8 +45,10 @@ static const char s_update_page[] =
     "padding:.9rem;border-radius:10px;border:1px solid #334155}"
     "button{background:#34d399;color:#06110d;font-weight:700}"
     "progress{width:100%;height:1.2rem}#status{min-height:1.5rem;color:#94a3b8}"
+    "code{color:#93c5fd}"
     "</style></head><body><div class='card'>"
     "<h1>C5 Bandit Update</h1>"
+    "<p>Running: <code>" BANDIT_VERSION "</code></p>"
     "<p>Select a <code>bandic5.bin</code> firmware image.</p>"
     "<input id='file' type='file' accept='.bin,application/octet-stream'>"
     "<button id='go'>Upload firmware</button>"
@@ -53,14 +57,23 @@ static const char s_update_page[] =
     "</div><script>"
     "const f=document.getElementById('file'),s=document.getElementById('status'),"
     "b=document.getElementById('bar'),g=document.getElementById('go');"
-    "g.onclick=async()=>{"
+    "g.onclick=()=>{"
     "if(!f.files.length){s.textContent='Choose bandic5.bin first.';return;}"
-    "g.disabled=true;s.textContent='Uploading...';b.value=10;"
-    "try{const r=await fetch('/update',{method:'POST',headers:{'Content-Type':'application/octet-stream'},"
-    "body:f.files[0]});const t=await r.text();"
-    "if(!r.ok)throw new Error(t||('HTTP '+r.status));"
-    "b.value=100;s.textContent='Update accepted. C5 Bandit is rebooting...';"
-    "}catch(e){b.value=0;s.textContent='Update failed: '+e.message;g.disabled=false;}};"
+    "g.disabled=true;b.value=0;s.textContent='Uploading...';"
+    "const x=new XMLHttpRequest();let sentAll=false;"
+    "x.open('POST','/update');x.setRequestHeader('Content-Type','application/octet-stream');"
+    "x.upload.onprogress=e=>{if(e.lengthComputable){b.value=Math.round(e.loaded*100/e.total);"
+    "sentAll=e.loaded===e.total;s.textContent='Uploading... '+b.value+'%';}};"
+    "x.onload=()=>{if(x.status>=200&&x.status<300){b.value=100;"
+    "s.textContent='Update accepted. C5 Bandit is rebooting...';}"
+    "else{s.textContent='Update failed: '+(x.responseText||('HTTP '+x.status));g.disabled=false;}};"
+    "x.onerror=()=>{if(sentAll){b.value=100;"
+    "s.textContent='Upload sent. Connection closed for reboot; check C5 Bandit.';}"
+    "else{b.value=0;s.textContent='Upload failed before completion.';g.disabled=false;}};"
+    "x.ontimeout=()=>{if(sentAll){b.value=100;"
+    "s.textContent='Upload sent. Device may be rebooting.';}"
+    "else{b.value=0;s.textContent='Upload timed out.';g.disabled=false;}};"
+    "x.timeout=120000;x.send(f.files[0]);};"
     "</script></body></html>";
 
 static void ota_button_task(void *arg)
@@ -186,10 +199,17 @@ static esp_err_t update_post_handler(httpd_req_t *req)
 
     bandit_ui_set_ota_progress(100, "REBOOTING");
     httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_sendstr(req, "Update accepted. Rebooting C5 Bandit.");
 
-    ESP_LOGI(TAG, "OTA complete; rebooting into %s", update_partition->label);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_LOGI(
+        TAG,
+        "OTA complete; rebooting into %s after %d ms",
+        update_partition->label,
+        BANDIT_OTA_REBOOT_DELAY_MS
+    );
+    vTaskDelay(pdMS_TO_TICKS(BANDIT_OTA_REBOOT_DELAY_MS));
     esp_restart();
 
     return ESP_OK;
