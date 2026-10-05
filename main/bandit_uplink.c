@@ -48,6 +48,7 @@ static bool s_have_snapshot;
 
 static const char s_status_page[] =
     "<!doctype html><html><head>"
+    "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>C5 Bandit</title>"
     "<style>"
@@ -70,11 +71,11 @@ static const char s_status_page[] =
     "async function tick(){try{const r=await fetch('/status.json',{cache:'no-store'});"
     "const d=await r.json();"
     "$('ver').textContent=d.version;"
-    "$('net').textContent=(d.connected?'Connected':'Disconnected')+' to '+d.ssid+' · '+(d.ip||'no IP');"
+    "$('net').textContent=(d.connected?'Connected':'Disconnected')+' to '+d.ssid+' \\u00b7 '+(d.ip||'no IP');"
     "$('g24').textContent=d.ap24+' AP';$('g5').textContent=d.ap5+' AP';"
-    "$('strong').textContent=d.strongest+' · '+d.rssi+' dBm · CH '+d.channel;"
-    "$('summary').textContent='TOTAL '+d.total+' · OPEN '+d.open+' · HIDDEN '+d.hidden+' · SCAN #'+d.scan;"
-    "$('storage').textContent='Storage: '+d.storage+' · uptime '+Math.floor(d.uptime_ms/1000)+' s';"
+    "$('strong').textContent=d.strongest+' \\u00b7 '+d.rssi+' dBm \\u00b7 CH '+d.channel;"
+    "$('summary').textContent='TOTAL '+d.total+' \\u00b7 OPEN '+d.open+' \\u00b7 HIDDEN '+d.hidden+' \\u00b7 SCAN #'+d.scan;"
+    "$('storage').textContent='Storage: '+d.storage+' \\u00b7 uptime '+Math.floor(d.uptime_ms/1000)+' s';"
     "}catch(e){$('net').textContent='Status temporarily unavailable';}}"
     "tick();setInterval(tick,2000);"
     "</script></body></html>";
@@ -120,7 +121,7 @@ static const char *storage_state_name(void)
 
 static esp_err_t status_root_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, s_status_page, HTTPD_RESP_USE_STRLEN);
 }
@@ -199,7 +200,7 @@ static esp_err_t status_json_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t ret = httpd_resp_send(req, json, written);
     free(json);
@@ -269,7 +270,7 @@ static void wifi_event_handler(
         s_connected = false;
         s_ip[0] = '\0';
         portEXIT_CRITICAL(&s_state_mux);
-        bandit_ui_set_uplink_state(false);
+        bandit_ui_set_uplink_state(true, false);
         bandit_ui_set_uplink_address(NULL);
         ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
     }
@@ -298,7 +299,7 @@ static void ip_event_handler(
     snprintf(s_ip, sizeof(s_ip), "%s", ip);
     portEXIT_CRITICAL(&s_state_mux);
 
-    bandit_ui_set_uplink_state(true);
+    bandit_ui_set_uplink_state(true, true);
     bandit_ui_set_uplink_address(ip);
     ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", s_ssid, ip);
 
@@ -415,6 +416,7 @@ esp_err_t bandit_uplink_init(void)
 
     esp_err_t ret = load_credentials(ssid, password);
     if (ret == ESP_ERR_NVS_NOT_FOUND || (ret == ESP_OK && ssid[0] == '\0')) {
+        bandit_ui_set_uplink_state(false, false);
         ESP_LOGI(TAG, "uplink not configured");
         return ESP_OK;
     }
@@ -477,6 +479,7 @@ esp_err_t bandit_uplink_init(void)
     portEXIT_CRITICAL(&s_state_mux);
 
     s_enabled = true;
+    bandit_ui_set_uplink_state(true, false);
 
     s_next_retry_ms = 0;
 
