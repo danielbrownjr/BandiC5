@@ -82,6 +82,12 @@ The upload page streams the firmware directly into the inactive OTA slot, so it 
 
 OTA mode is intentionally local and physically initiated. It is not exposed during ordinary scanning.
 
+### OTA verification build
+
+The first phone-OTA verification payload identifies itself as **`v0.2.1 OTA TEST`** on the normal dashboard, updater page, and serial boot log. That visible identity exists specifically to prove that a phone-uploaded application image actually booted after the slot switch.
+
+The updater web UI uses browser upload progress and treats a connection loss after 100% of the file has been transmitted as an expected reboot condition rather than automatically reporting a failed update. The firmware also waits four seconds after returning the success response before rebooting.
+
 ### First OTA-capable installation
 
 The first installation of this partition layout must still be flashed over USB because it changes the bootloader/partition-table environment.
