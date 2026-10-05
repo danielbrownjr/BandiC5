@@ -82,6 +82,15 @@ The upload page streams the firmware directly into the inactive OTA slot, so it 
 
 OTA mode is intentionally local and physically initiated. It is not exposed during ordinary scanning.
 
+### OTA stack-overflow fix
+
+A physical OTA attempt exposed a stack-protection panic in the HTTP upload path. The original updater placed a 4096-byte receive buffer on a 6144-byte HTTP server task stack. The fix:
+
+- moves the OTA receive buffer to heap storage
+- increases the HTTP server task stack to 10240 bytes
+- keeps the visible verification identity as **`v0.2.2 OTA STACKFIX`**
+- retains `bandic5.elf` and `bandic5.map` in CI artifacts for future panic decoding
+
 ### OTA verification build
 
 The first phone-OTA verification payload identifies itself as **`v0.2.1 OTA TEST`** on the normal dashboard, updater page, and serial boot log. That visible identity exists specifically to prove that a phone-uploaded application image actually booted after the slot switch.
