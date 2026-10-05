@@ -8,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
@@ -104,7 +105,11 @@ esp_err_t bandit_scan_init(void)
     return ESP_OK;
 }
 
-esp_err_t bandit_scan_once(bandit_scan_snapshot_t *snapshot)
+esp_err_t bandit_scan_once(
+    bandit_scan_snapshot_t *snapshot,
+    bandit_scan_record_callback_t record_callback,
+    void *record_callback_ctx
+)
 {
     if (!snapshot) {
         return ESP_ERR_INVALID_ARG;
@@ -151,8 +156,14 @@ esp_err_t bandit_scan_once(bandit_scan_snapshot_t *snapshot)
         return ret;
     }
 
+    const int64_t observed_ms = esp_timer_get_time() / 1000;
+
     for (uint16_t i = 0; i < record_count; i++) {
         const wifi_ap_record_t *record = &records[i];
+        const bool hidden = record->ssid[0] == 0;
+        char ssid[33];
+
+        ssid_to_text(record->ssid, ssid);
 
         if (record->primary > 14) {
             snapshot->count_5g++;
@@ -160,7 +171,7 @@ esp_err_t bandit_scan_once(bandit_scan_snapshot_t *snapshot)
             snapshot->count_2g++;
         }
 
-        if (record->ssid[0] == 0) {
+        if (hidden) {
             snapshot->hidden++;
         }
 
@@ -171,13 +182,39 @@ esp_err_t bandit_scan_once(bandit_scan_snapshot_t *snapshot)
         if (record->rssi > snapshot->strongest_rssi) {
             snapshot->strongest_rssi = record->rssi;
             snapshot->strongest_channel = record->primary;
-            ssid_to_text(record->ssid, snapshot->strongest_ssid);
+            snprintf(
+                snapshot->strongest_ssid,
+                sizeof(snapshot->strongest_ssid),
+                "%s",
+                ssid
+            );
             snprintf(
                 snapshot->strongest_auth,
                 sizeof(snapshot->strongest_auth),
                 "%s",
                 auth_name(record->authmode)
             );
+        }
+
+        if (record_callback) {
+            bandit_scan_record_t emitted = {
+                .generation = snapshot->generation,
+                .uptime_ms = observed_ms,
+                .rssi = record->rssi,
+                .channel = record->primary,
+                .hidden = hidden,
+            };
+
+            memcpy(emitted.bssid, record->bssid, sizeof(emitted.bssid));
+            snprintf(emitted.ssid, sizeof(emitted.ssid), "%s", ssid);
+            snprintf(
+                emitted.auth,
+                sizeof(emitted.auth),
+                "%s",
+                auth_name(record->authmode)
+            );
+
+            record_callback(&emitted, record_callback_ctx);
         }
     }
 
