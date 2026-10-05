@@ -224,7 +224,7 @@ Downloads use a numeric session parameter:
 
 The firmware reconstructs the expected `session-0017.csv` path internally. Arbitrary filesystem paths are never accepted from the browser.
 
-The current active session is marked separately. It is downloadable, but because BandiC5 intentionally batches TF flushes, the downloaded active file may lag the live scan by up to the normal flush interval. Completed session files are stable.
+The current active session is marked separately and is intentionally not downloadable while it is still open for writing. Completed session files are stable and downloadable.
 
 Session metadata is available from:
 
