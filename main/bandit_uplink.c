@@ -1,5 +1,6 @@
 #include "bandit_uplink.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "esp_event.h"
@@ -27,6 +29,9 @@
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 15000
 #define BANDIT_UPLINK_HTTP_STACK 8192
+#define BANDIT_UPLINK_AP_CACHE_MAX 64
+#define BANDIT_UPLINK_SESSION_LIST_MAX 32
+#define BANDIT_UPLINK_DOWNLOAD_BUFFER 2048
 
 static const char *TAG = "bandit_uplink";
 
@@ -45,6 +50,15 @@ static bool s_mdns_started;
 static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static bandit_scan_snapshot_t s_snapshot;
 static bool s_have_snapshot;
+
+static SemaphoreHandle_t s_ap_mutex;
+static bandit_scan_record_t s_work_aps[BANDIT_UPLINK_AP_CACHE_MAX];
+static size_t s_work_ap_count;
+static size_t s_work_seen;
+static bandit_scan_record_t s_published_aps[BANDIT_UPLINK_AP_CACHE_MAX];
+static size_t s_published_ap_count;
+static uint32_t s_published_generation;
+static bool s_published_truncated;
 
 static const char s_status_page[] =
     "<!doctype html><html><head>"
