@@ -9,6 +9,8 @@ dependencies:
   espressif/esp_lvgl_port:
     version: "2.9.0"
 
+  espressif/mdns: "^1.0.3"
+
   espressif/led_strip:
     version: "3.0.3"
 
