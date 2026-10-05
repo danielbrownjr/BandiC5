@@ -14,3 +14,10 @@ esp_err_t bandit_ui_init(void);
 void bandit_ui_set_status(const char *status);
 void bandit_ui_set_storage_state(bandit_ui_storage_state_t state);
 void bandit_ui_update(const bandit_scan_snapshot_t *snapshot);
+
+void bandit_ui_show_ota_mode(
+    const char *ssid,
+    const char *password,
+    const char *address
+);
+void bandit_ui_set_ota_progress(int percent, const char *status);
