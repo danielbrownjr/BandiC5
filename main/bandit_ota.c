@@ -37,6 +37,7 @@ static esp_netif_t *s_ap_netif;
 
 static const char s_update_page[] =
     "<!doctype html><html><head>"
+    "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>BandiC5 Update</title>"
     "<style>"
@@ -117,7 +118,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "HTTP root request, stack high water=%u",
         (unsigned)uxTaskGetStackHighWaterMark(NULL)
     );
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, s_update_page, HTTPD_RESP_USE_STRLEN);
 }
@@ -269,11 +270,11 @@ static esp_err_t wifi_config_post_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "uplink configuration %s", ssid[0] ? "saved" : "cleared");
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(
         req,
-        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<body style='font-family:sans-serif;background:#090d12;color:#e2e8f0;padding:2rem'>"
         "<h2>Wi-Fi saved</h2><p>C5 Bandit is rebooting into scout mode.</p></body>"
     );
