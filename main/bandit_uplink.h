@@ -7,6 +7,7 @@
 #include "bandit_scan.h"
 
 esp_err_t bandit_uplink_init(void);
+void bandit_uplink_service(void);
 void bandit_uplink_stop(void);
 void bandit_uplink_publish_snapshot(const bandit_scan_snapshot_t *snapshot);
 
