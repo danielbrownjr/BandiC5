@@ -13,6 +13,7 @@ typedef enum {
 } bandit_storage_state_t;
 
 esp_err_t bandit_storage_init(void);
+void bandit_storage_service(void);
 void bandit_storage_log_record(const bandit_scan_record_t *record, void *ctx);
 void bandit_storage_finish_scan(uint32_t generation);
 bandit_storage_state_t bandit_storage_get_state(void);
