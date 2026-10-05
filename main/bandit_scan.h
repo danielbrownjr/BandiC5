@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -17,5 +18,25 @@ typedef struct {
     char strongest_auth[12];
 } bandit_scan_snapshot_t;
 
+typedef struct {
+    uint32_t generation;
+    int64_t uptime_ms;
+    uint8_t bssid[6];
+    char ssid[33];
+    int8_t rssi;
+    uint8_t channel;
+    bool hidden;
+    char auth[12];
+} bandit_scan_record_t;
+
+typedef void (*bandit_scan_record_callback_t)(
+    const bandit_scan_record_t *record,
+    void *ctx
+);
+
 esp_err_t bandit_scan_init(void);
-esp_err_t bandit_scan_once(bandit_scan_snapshot_t *snapshot);
+esp_err_t bandit_scan_once(
+    bandit_scan_snapshot_t *snapshot,
+    bandit_scan_record_callback_t record_callback,
+    void *record_callback_ctx
+);
