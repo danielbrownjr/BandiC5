@@ -16,8 +16,10 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs.h"
+#include "mdns.h"
 
 #include "bandit_storage.h"
+#include "bandit_ui.h"
 #include "bandit_version.h"
 
 #define BANDIT_UPLINK_NVS_NAMESPACE "uplink"
@@ -28,7 +30,7 @@
 
 static const char *TAG = "bandit_uplink";
 
-static bool s_enabled;
+static volatile bool s_enabled;
 static bool s_connected;
 static char s_ssid[33];
 static char s_ip[16];
@@ -38,6 +40,7 @@ static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static bool s_wifi_handler_registered;
 static bool s_ip_handler_registered;
+static bool s_mdns_started;
 
 static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 static bandit_scan_snapshot_t s_snapshot;
@@ -266,7 +269,7 @@ static void wifi_event_handler(
         s_connected = false;
         s_ip[0] = '\0';
         portEXIT_CRITICAL(&s_state_mux);
-        s_next_retry_ms = 0;
+        bandit_ui_set_uplink_state(false);
         ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
     }
 }
@@ -294,11 +297,24 @@ static void ip_event_handler(
     snprintf(s_ip, sizeof(s_ip), "%s", ip);
     portEXIT_CRITICAL(&s_state_mux);
 
+    bandit_ui_set_uplink_state(true);
     ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", s_ssid, ip);
 
     esp_err_t ret = start_status_server();
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "status page ready: http://%s/", ip);
+        if (!s_mdns_started) {
+            esp_err_t mdns_ret = mdns_init();
+            if (mdns_ret == ESP_OK) {
+                (void)mdns_hostname_set("bandic5");
+                (void)mdns_instance_name_set("C5 Bandit");
+                (void)mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+                s_mdns_started = true;
+            } else {
+                ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(mdns_ret));
+            }
+        }
+
+        ESP_LOGI(TAG, "status page ready: http://%s/ (try http://bandic5.local/)", ip);
     }
 }
 
@@ -374,6 +390,9 @@ esp_err_t bandit_uplink_clear_credentials(void)
 {
     nvs_handle_t handle;
     esp_err_t ret = nvs_open(BANDIT_UPLINK_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
     if (ret != ESP_OK) {
         return ret;
     }
@@ -501,6 +520,13 @@ void bandit_uplink_stop(void)
         httpd_stop(s_server);
         s_server = NULL;
     }
+
+    if (s_mdns_started) {
+        mdns_free();
+        s_mdns_started = false;
+    }
+
+    bandit_ui_set_uplink_state(false);
 
     if (s_wifi_handler_registered) {
         esp_event_handler_instance_unregister(
