@@ -4,12 +4,26 @@
 #include "esp_log.h"
 
 #include "bandit_scan.h"
+#include "bandit_storage.h"
 #include "bandit_ui.h"
 
 #define SCAN_TASK_STACK_SIZE (8 * 1024)
 #define SCAN_INTERVAL_MS 3500
 
 static const char *TAG = "bandic5";
+
+static bandit_ui_storage_state_t storage_ui_state(void)
+{
+    switch (bandit_storage_get_state()) {
+    case BANDIT_STORAGE_READY:
+        return BANDIT_UI_STORAGE_READY;
+    case BANDIT_STORAGE_ERROR:
+        return BANDIT_UI_STORAGE_ERROR;
+    case BANDIT_STORAGE_NO_CARD:
+    default:
+        return BANDIT_UI_STORAGE_NONE;
+    }
+}
 
 static void scan_task(void *arg)
 {
@@ -20,9 +34,17 @@ static void scan_task(void *arg)
 
         bandit_ui_set_status("SCANNING");
 
-        esp_err_t ret = bandit_scan_once(&snapshot);
+        esp_err_t ret = bandit_scan_once(
+            &snapshot,
+            bandit_storage_log_record,
+            NULL
+        );
+
         if (ret == ESP_OK) {
+            bandit_storage_finish_scan(snapshot.generation);
+            bandit_ui_set_storage_state(storage_ui_state());
             bandit_ui_update(&snapshot);
+
             ESP_LOGI(
                 TAG,
                 "scan=%lu aps=%u 2g=%u 5g=%u strongest=%s rssi=%d ch=%u",
@@ -36,6 +58,7 @@ static void scan_task(void *arg)
             );
         } else {
             ESP_LOGE(TAG, "scan failed: %s", esp_err_to_name(ret));
+            bandit_ui_set_storage_state(storage_ui_state());
             bandit_ui_set_status("SCAN ERROR");
         }
 
@@ -51,6 +74,20 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "display init failed: %s", esp_err_to_name(ret));
         return;
+    }
+
+    bandit_ui_set_status("SD INIT");
+    ret = bandit_storage_init();
+    bandit_ui_set_storage_state(storage_ui_state());
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "TF logging enabled: %s", bandit_storage_get_session_path());
+    } else {
+        ESP_LOGW(
+            TAG,
+            "TF logging unavailable; continuing without storage: %s",
+            esp_err_to_name(ret)
+        );
     }
 
     bandit_ui_set_status("RADIO INIT");
