@@ -189,6 +189,53 @@ Some hotspot implementations isolate connected clients from the hotspot host or 
 
 The ESP32-C5 has one Wi-Fi radio. Active dual-band scouting temporarily visits channels away from the associated AP. BandiC5 explicitly uses Espressif's home-channel dwell between scan channels to help preserve the infrastructure connection, but brief latency during scans is expected. Uplink monitoring is intentionally low-bandwidth and read-only.
 
+## v0.4 web observability
+
+v0.4 turns the existing uplink page into a practical read-only RF and logging console.
+
+### Latest-scan AP table
+
+The browser shows a table from the most recently **completed** RF scan:
+
+- SSID
+- BSSID
+- 2.4 GHz / 5 GHz band
+- channel
+- RSSI
+- authentication mode
+
+Rows are sorted strongest-first.
+
+The device keeps a bounded cache of the strongest 64 APs. If a scan sees more than 64 APs, the JSON response marks the table as truncated rather than consuming unbounded RAM. The browser never reads a half-built scan; the working set is published only when a complete scan succeeds.
+
+The raw endpoint is:
+
+`/aps.json`
+
+SSID values are inserted into the browser through DOM `textContent`, not interpreted as HTML.
+
+### TF session browser and downloads
+
+When a TF card is mounted, the web page lists the newest 32 numbered BandiC5 sessions and provides a download link for each.
+
+Downloads use a numeric session parameter:
+
+`/download?session=17`
+
+The firmware reconstructs the expected `session-0017.csv` path internally. Arbitrary filesystem paths are never accepted from the browser.
+
+The current active session is marked separately. It is downloadable, but because BandiC5 intentionally batches TF flushes, the downloaded active file may lag the live scan by up to the normal flush interval. Completed session files are stable.
+
+Session metadata is available from:
+
+`/logs.json`
+
+CSV files are streamed in small chunks rather than loaded into RAM.
+
+### v0.3.1 recovery landmark
+
+The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
+
 ## Build
 
 The project targets **ESP-IDF v5.5.5** and **esp32c5**.
