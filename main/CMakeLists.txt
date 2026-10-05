@@ -19,4 +19,5 @@ idf_component_register(
         esp_timer
         nvs_flash
         lvgl
+        mdns
 )
