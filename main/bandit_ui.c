@@ -16,6 +16,8 @@ static lv_obj_t *s_strongest_value;
 static lv_obj_t *s_summary_value;
 static lv_obj_t *s_status;
 static lv_obj_t *s_storage_status;
+static lv_obj_t *s_ota_progress;
+static lv_obj_t *s_ota_status;
 
 #if LVGL_VERSION_MAJOR >= 9
 static lv_obj_t *active_screen(void)
@@ -255,6 +257,131 @@ void bandit_ui_update(const bandit_scan_snapshot_t *snapshot)
     );
     lv_label_set_text(s_summary_value, text);
     lv_label_set_text(s_status, "READY");
+
+    bsp_display_unlock();
+}
+
+
+void bandit_ui_show_ota_mode(
+    const char *ssid,
+    const char *password,
+    const char *address
+)
+{
+    if (!bsp_display_lock(0)) {
+        return;
+    }
+
+    lv_obj_t *screen = active_screen();
+    lv_obj_clean(screen);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x090d12), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    // Normal dashboard objects no longer exist after entering update mode.
+    s_band24_value = NULL;
+    s_band5_value = NULL;
+    s_band24_bar = NULL;
+    s_band5_bar = NULL;
+    s_strongest_value = NULL;
+    s_summary_value = NULL;
+    s_status = NULL;
+    s_storage_status = NULL;
+
+    lv_obj_t *title = lv_label_create(screen);
+    lv_label_set_text(title, "UPDATE MODE");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xf8fafc), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+
+    lv_obj_t *hint = lv_label_create(screen);
+    lv_label_set_text(hint, "Connect phone to:");
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x94a3b8), 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 43);
+
+    lv_obj_t *ssid_label = lv_label_create(screen);
+    lv_label_set_text(ssid_label, ssid ? ssid : "BandiC5-Update");
+    lv_obj_set_width(ssid_label, 160);
+    lv_obj_set_style_text_align(ssid_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(ssid_label, lv_color_hex(0x34d399), 0);
+    lv_obj_align(ssid_label, LV_ALIGN_TOP_MID, 0, 64);
+
+    lv_obj_t *pass_title = lv_label_create(screen);
+    lv_label_set_text(pass_title, "Password");
+    lv_obj_set_style_text_color(pass_title, lv_color_hex(0x64748b), 0);
+    lv_obj_align(pass_title, LV_ALIGN_TOP_MID, 0, 92);
+
+    lv_obj_t *pass = lv_label_create(screen);
+    lv_label_set_text(pass, password ? password : "");
+    lv_obj_set_style_text_color(pass, lv_color_hex(0xe2e8f0), 0);
+    lv_obj_align(pass, LV_ALIGN_TOP_MID, 0, 111);
+
+    lv_obj_t *open_title = lv_label_create(screen);
+    lv_label_set_text(open_title, "Then open Safari:");
+    lv_obj_set_style_text_color(open_title, lv_color_hex(0x94a3b8), 0);
+    lv_obj_align(open_title, LV_ALIGN_TOP_MID, 0, 143);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s", address ? address : "192.168.4.1");
+
+    lv_obj_t *url_label = lv_label_create(screen);
+    lv_label_set_text(url_label, url);
+    lv_obj_set_width(url_label, 164);
+    lv_obj_set_style_text_align(url_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(url_label, lv_color_hex(0x60a5fa), 0);
+    lv_obj_align(url_label, LV_ALIGN_TOP_MID, 0, 164);
+
+    lv_obj_t *file_hint = lv_label_create(screen);
+    lv_label_set_text(file_hint, "Upload bandic5.bin");
+    lv_obj_set_style_text_color(file_hint, lv_color_hex(0xcbd5e1), 0);
+    lv_obj_align(file_hint, LV_ALIGN_TOP_MID, 0, 197);
+
+    s_ota_progress = lv_bar_create(screen);
+    lv_obj_set_size(s_ota_progress, 150, 10);
+    lv_obj_align(s_ota_progress, LV_ALIGN_TOP_MID, 0, 226);
+    lv_bar_set_range(s_ota_progress, 0, 100);
+    lv_bar_set_value(s_ota_progress, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_ota_progress, lv_color_hex(0x1e293b), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_ota_progress, lv_color_hex(0x34d399), LV_PART_INDICATOR);
+
+    s_ota_status = lv_label_create(screen);
+    lv_label_set_text(s_ota_status, "WAITING FOR PHONE");
+    lv_obj_set_width(s_ota_status, 160);
+    lv_obj_set_style_text_align(s_ota_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_ota_status, lv_color_hex(0xf59e0b), 0);
+    lv_obj_align(s_ota_status, LV_ALIGN_TOP_MID, 0, 248);
+
+    lv_obj_t *warning = lv_label_create(screen);
+    lv_label_set_text(warning, "Do not power off while uploading");
+    lv_obj_set_width(warning, 164);
+    lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(warning, lv_color_hex(0x64748b), 0);
+    lv_obj_align(warning, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    bsp_display_unlock();
+}
+
+void bandit_ui_set_ota_progress(int percent, const char *status)
+{
+    if (!s_ota_progress || !s_ota_status || !bsp_display_lock(0)) {
+        return;
+    }
+
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+
+    lv_bar_set_value(s_ota_progress, percent, LV_ANIM_ON);
+    lv_label_set_text(s_ota_status, status ? status : "");
+
+    if (percent == 100) {
+        lv_obj_set_style_text_color(s_ota_status, lv_color_hex(0x34d399), 0);
+    } else if (percent == 0 && status && strstr(status, "FAILED")) {
+        lv_obj_set_style_text_color(s_ota_status, lv_color_hex(0xf87171), 0);
+    } else {
+        lv_obj_set_style_text_color(s_ota_status, lv_color_hex(0xf59e0b), 0);
+    }
 
     bsp_display_unlock();
 }
