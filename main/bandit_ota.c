@@ -204,7 +204,7 @@ static bool form_value(
         const char *equals = memchr(p, '=', (size_t)(entry_end - p));
         if (equals && (size_t)(equals - p) == key_len && strncmp(p, key, key_len) == 0) {
             size_t encoded_len = (size_t)(entry_end - equals - 1);
-            char encoded[128];
+            char encoded[256];
 
             if (encoded_len >= sizeof(encoded)) {
                 return false;
@@ -224,12 +224,12 @@ static bool form_value(
 
 static esp_err_t wifi_config_post_handler(httpd_req_t *req)
 {
-    if (req->content_len == 0 || req->content_len >= 256) {
+    if (req->content_len == 0 || req->content_len >= 384) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi form");
         return ESP_FAIL;
     }
 
-    char body[256];
+    char body[384];
     size_t remaining = req->content_len;
     size_t offset = 0;
 
