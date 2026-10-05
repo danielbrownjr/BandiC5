@@ -131,17 +131,18 @@ static void create_ui(void)
     lv_label_set_long_mode(s_strongest_value, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_align(s_strongest_value, LV_ALIGN_TOP_LEFT, 8, 25);
 
+    // Keep the two-line summary above a dedicated footer band for SCANNING/READY.
     s_summary_value = lv_label_create(screen);
     lv_label_set_text(s_summary_value, "TOTAL 0   OPEN 0\nHIDDEN 0   SCAN #0");
-    lv_obj_set_width(s_summary_value, 154);
+    lv_obj_set_size(s_summary_value, 154, 34);
     lv_obj_set_style_text_color(s_summary_value, lv_color_hex(0xa8b3c2), 0);
     lv_obj_set_style_text_align(s_summary_value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_summary_value, LV_ALIGN_TOP_MID, 0, 260);
+    lv_obj_align(s_summary_value, LV_ALIGN_TOP_MID, 0, 252);
 
     s_status = lv_label_create(screen);
     lv_label_set_text(s_status, "BOOTING");
     lv_obj_set_style_text_color(s_status, lv_color_hex(0x34d399), 0);
-    lv_obj_align(s_status, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_align(s_status, LV_ALIGN_BOTTOM_MID, 0, -6);
 }
 
 esp_err_t bandit_ui_init(void)
