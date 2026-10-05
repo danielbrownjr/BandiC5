@@ -25,7 +25,7 @@
 #define BANDIT_UPLINK_NVS_NAMESPACE "uplink"
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
-#define BANDIT_UPLINK_RETRY_MS 5000
+#define BANDIT_UPLINK_RETRY_MS 15000
 #define BANDIT_UPLINK_HTTP_STACK 8192
 
 static const char *TAG = "bandit_uplink";
@@ -478,8 +478,7 @@ esp_err_t bandit_uplink_init(void)
 
     s_next_retry_ms = 0;
 
-    ESP_LOGI(TAG, "uplink enabled for SSID=%s", s_ssid);
-    bandit_uplink_service();
+    ESP_LOGI(TAG, "uplink enabled for SSID=%s; first connect follows initial RF scan", s_ssid);
     return ESP_OK;
 }
 
