@@ -21,6 +21,7 @@ static FILE *s_log_file;
 static bandit_storage_state_t s_state = BANDIT_STORAGE_NO_CARD;
 static char s_session_path[BANDIT_SESSION_PATH_MAX];
 static uint32_t s_scans_since_flush;
+static bool s_mounted;
 
 static void set_error(const char *reason)
 {
@@ -119,23 +120,27 @@ esp_err_t bandit_storage_init(void)
     s_state = BANDIT_STORAGE_NO_CARD;
     s_session_path[0] = '\0';
     s_scans_since_flush = 0;
+    s_mounted = false;
 
     esp_err_t ret = bsp_sdcard_mount();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "TF card unavailable: %s", esp_err_to_name(ret));
         return ret;
     }
+    s_mounted = true;
 
     ret = ensure_log_directory();
     if (ret != ESP_OK) {
-        bsp_sdcard_unmount();
+        (void)bsp_sdcard_unmount();
+        s_mounted = false;
         s_state = BANDIT_STORAGE_ERROR;
         return ret;
     }
 
     ret = choose_session_path();
     if (ret != ESP_OK) {
-        bsp_sdcard_unmount();
+        (void)bsp_sdcard_unmount();
+        s_mounted = false;
         s_state = BANDIT_STORAGE_ERROR;
         return ret;
     }
@@ -143,7 +148,8 @@ esp_err_t bandit_storage_init(void)
     s_log_file = fopen(s_session_path, "wb");
     if (!s_log_file) {
         ESP_LOGE(TAG, "open %s failed: %s", s_session_path, strerror(errno));
-        bsp_sdcard_unmount();
+        (void)bsp_sdcard_unmount();
+        s_mounted = false;
         s_state = BANDIT_STORAGE_ERROR;
         return ESP_FAIL;
     }
@@ -154,7 +160,8 @@ esp_err_t bandit_storage_init(void)
         ) == EOF ||
         flush_log() != ESP_OK) {
         set_error("failed to initialize session log");
-        bsp_sdcard_unmount();
+        (void)bsp_sdcard_unmount();
+        s_mounted = false;
         return ESP_FAIL;
     }
 
@@ -250,8 +257,9 @@ void bandit_storage_deinit(void)
         s_log_file = NULL;
     }
 
-    if (s_state != BANDIT_STORAGE_NO_CARD) {
+    if (s_mounted) {
         (void)bsp_sdcard_unmount();
+        s_mounted = false;
     }
 
     s_state = BANDIT_STORAGE_NO_CARD;
