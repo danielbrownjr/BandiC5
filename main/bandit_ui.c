@@ -322,6 +322,7 @@ void bandit_ui_show_ota_mode(
     s_status = NULL;
     s_storage_status = NULL;
     s_uplink_status = NULL;
+    s_subtitle = NULL;
 
     lv_obj_t *title = lv_label_create(screen);
     lv_label_set_text(title, "UPDATE MODE");
