@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "bandit_scan.c"
+        "bandit_storage.c"
         "bandit_ui.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -9,6 +10,7 @@ idf_component_register(
         esp_wifi
         esp_event
         esp_netif
+        esp_timer
         nvs_flash
         lvgl
 )
