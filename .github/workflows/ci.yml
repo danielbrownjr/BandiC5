@@ -35,6 +35,8 @@ jobs:
           retention-days: 30
           path: |
             build/bandic5.bin
+            build/bandic5.elf
+            build/bandic5.map
             build/ota_data_initial.bin
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
