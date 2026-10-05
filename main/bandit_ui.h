@@ -15,7 +15,7 @@ typedef enum {
 esp_err_t bandit_ui_init(void);
 void bandit_ui_set_status(const char *status);
 void bandit_ui_set_storage_state(bandit_ui_storage_state_t state);
-void bandit_ui_set_uplink_state(bool connected);
+void bandit_ui_set_uplink_state(bool configured, bool connected);
 void bandit_ui_set_uplink_address(const char *address);
 void bandit_ui_update(const bandit_scan_snapshot_t *snapshot);
 
