@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -133,21 +134,30 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         (unsigned long)update_partition->address
     );
 
+    char *buffer = malloc(BANDIT_OTA_RECV_BUFFER);
+    if (!buffer) {
+        ESP_LOGE(TAG, "unable to allocate %d-byte OTA receive buffer", BANDIT_OTA_RECV_BUFFER);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
     esp_ota_handle_t ota_handle = 0;
     esp_err_t ret = esp_ota_begin(update_partition, req->content_len, &ota_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(ret));
+        free(buffer);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to start OTA write");
         return ret;
     }
 
-    char buffer[BANDIT_OTA_RECV_BUFFER];
     size_t remaining = req->content_len;
     size_t received_total = 0;
     int last_percent = -1;
 
     while (remaining > 0) {
-        size_t to_read = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        size_t to_read = remaining < BANDIT_OTA_RECV_BUFFER
+            ? remaining
+            : BANDIT_OTA_RECV_BUFFER;
         int received = httpd_req_recv(req, buffer, to_read);
 
         if (received == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -157,6 +167,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         if (received <= 0) {
             ESP_LOGE(TAG, "firmware upload interrupted");
             esp_ota_abort(ota_handle);
+            free(buffer);
             bandit_ui_set_ota_progress(0, "UPLOAD FAILED");
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload interrupted");
             return ESP_FAIL;
@@ -166,6 +177,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(ret));
             esp_ota_abort(ota_handle);
+            free(buffer);
             bandit_ui_set_ota_progress(0, "WRITE FAILED");
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Flash write failed");
             return ret;
@@ -180,6 +192,9 @@ static esp_err_t update_post_handler(httpd_req_t *req)
             last_percent = percent;
         }
     }
+
+    free(buffer);
+    buffer = NULL;
 
     ret = esp_ota_end(ota_handle);
     if (ret != ESP_OK) {
@@ -302,7 +317,9 @@ esp_err_t bandit_ota_start(void)
     }
 
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
-    server_config.stack_size = 6144;
+    // Keep OTA buffers off this task's stack, and retain extra headroom for
+    // HTTP parsing, Wi-Fi/TCP callbacks, and response handling.
+    server_config.stack_size = 10240;
     server_config.max_uri_handlers = 4;
 
     ret = httpd_start(&s_server, &server_config);
