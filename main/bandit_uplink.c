@@ -24,7 +24,6 @@
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 5000
-#define BANDIT_UPLINK_TASK_STACK 3072
 #define BANDIT_UPLINK_HTTP_STACK 8192
 
 static const char *TAG = "bandit_uplink";
@@ -34,7 +33,7 @@ static bool s_connected;
 static char s_ssid[33];
 static char s_ip[16];
 static httpd_handle_t s_server;
-static TaskHandle_t s_retry_task;
+static int64_t s_next_retry_ms;
 static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static bool s_wifi_handler_registered;
@@ -267,7 +266,8 @@ static void wifi_event_handler(
         s_connected = false;
         s_ip[0] = '\0';
         portEXIT_CRITICAL(&s_state_mux);
-        ESP_LOGW(TAG, "uplink disconnected; retry task will reconnect");
+        s_next_retry_ms = 0;
+        ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
     }
 }
 
@@ -300,31 +300,6 @@ static void ip_event_handler(
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "status page ready: http://%s/", ip);
     }
-}
-
-static void retry_task(void *arg)
-{
-    (void)arg;
-
-    while (s_enabled) {
-        bool connected;
-
-        portENTER_CRITICAL(&s_state_mux);
-        connected = s_connected;
-        portEXIT_CRITICAL(&s_state_mux);
-
-        if (!connected) {
-            esp_err_t ret = esp_wifi_connect();
-            if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN) {
-                ESP_LOGD(TAG, "uplink connect attempt: %s", esp_err_to_name(ret));
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(BANDIT_UPLINK_RETRY_MS));
-    }
-
-    s_retry_task = NULL;
-    vTaskDelete(NULL);
 }
 
 static esp_err_t load_credentials(char ssid[33], char password[64])
@@ -482,37 +457,45 @@ esp_err_t bandit_uplink_init(void)
 
     s_enabled = true;
 
-    BaseType_t task_ret = xTaskCreate(
-        retry_task,
-        "uplink_retry",
-        BANDIT_UPLINK_TASK_STACK,
-        NULL,
-        3,
-        &s_retry_task
-    );
-    if (task_ret != pdPASS) {
-        bandit_uplink_stop();
-        return ESP_ERR_NO_MEM;
-    }
+    s_next_retry_ms = 0;
 
     ESP_LOGI(TAG, "uplink enabled for SSID=%s", s_ssid);
-    ret = esp_wifi_connect();
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN) {
-        ESP_LOGW(TAG, "initial uplink connect: %s", esp_err_to_name(ret));
+    bandit_uplink_service();
+    return ESP_OK;
+}
+
+void bandit_uplink_service(void)
+{
+    if (!s_enabled) {
+        return;
     }
 
-    return ESP_OK;
+    bool connected;
+    portENTER_CRITICAL(&s_state_mux);
+    connected = s_connected;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if (connected) {
+        return;
+    }
+
+    const int64_t current_ms = esp_timer_get_time() / 1000;
+    if (s_next_retry_ms != 0 && current_ms < s_next_retry_ms) {
+        return;
+    }
+
+    esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN && ret != ESP_ERR_WIFI_STATE) {
+        ESP_LOGD(TAG, "uplink connect attempt: %s", esp_err_to_name(ret));
+    }
+
+    s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
 }
 
 void bandit_uplink_stop(void)
 {
     s_enabled = false;
-
-    if (s_retry_task) {
-        TaskHandle_t task = s_retry_task;
-        s_retry_task = NULL;
-        vTaskDelete(task);
-    }
+    s_next_retry_ms = 0;
 
     if (s_server) {
         httpd_stop(s_server);
