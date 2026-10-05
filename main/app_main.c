@@ -72,6 +72,13 @@ static void wait_for_next_scan_or_ota(void)
     }
 }
 
+static void handle_scan_record(const bandit_scan_record_t *record, void *ctx)
+{
+    (void)ctx;
+    bandit_storage_log_record(record, NULL);
+    bandit_uplink_observe_record(record);
+}
+
 static void scan_task(void *arg)
 {
     (void)arg;
@@ -86,10 +93,11 @@ static void scan_task(void *arg)
 
         bandit_scan_snapshot_t snapshot;
         bandit_ui_set_status("SCANNING");
+        bandit_uplink_begin_scan();
 
         esp_err_t ret = bandit_scan_once(
             &snapshot,
-            bandit_storage_log_record,
+            handle_scan_record,
             NULL
         );
 
