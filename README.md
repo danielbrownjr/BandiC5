@@ -164,7 +164,7 @@ Credentials are stored in the ESP32-C5 NVS partition and are not written to the 
 
 When the STA receives an IP address:
 
-- the dashboard shows a green `NET` badge
+- the dashboard shows a compact globe indicator: green while connected, gray while configured/disconnected, hidden when uplink is disabled
 - the dashboard subtitle changes to the assigned numeric IP while connected
 - serial logs report the SSID and assigned IP
 - BandiC5 advertises the mDNS hostname `bandic5`
