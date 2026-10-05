@@ -130,6 +130,7 @@ esp_err_t bandit_scan_once(
             .min = SCAN_ACTIVE_MIN_MS,
             .max = SCAN_ACTIVE_MAX_MS,
         },
+        .home_chan_dwell_time = WIFI_SCAN_HOME_CHANNEL_DWELL_DEFAULT_TIME,
     };
 
     ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&scan_cfg, true), TAG, "scan failed");
