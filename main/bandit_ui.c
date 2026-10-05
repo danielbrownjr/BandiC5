@@ -1,6 +1,7 @@
 #include "bandit_ui.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "bsp/esp-bsp.h"
 #include "esp_check.h"
