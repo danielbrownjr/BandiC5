@@ -1,4 +1,5 @@
 #include "bandit_ui.h"
+#include "bandit_version.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -95,7 +96,7 @@ static void create_ui(void)
     lv_obj_align(s_storage_status, LV_ALIGN_TOP_RIGHT, -6, 10);
 
     lv_obj_t *subtitle = lv_label_create(screen);
-    lv_label_set_text(subtitle, "BandiC5 RF scout");
+    lv_label_set_text(subtitle, BANDIT_VERSION);
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0x7f8ea3), 0);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 34);
 
