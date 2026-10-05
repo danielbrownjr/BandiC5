@@ -19,6 +19,7 @@
 #include "esp_wifi.h"
 
 #include "bandit_ui.h"
+#include "bandit_uplink.h"
 #include "bandit_version.h"
 
 #define BANDIT_OTA_BOOT_GPIO GPIO_NUM_28
@@ -55,7 +56,15 @@ static const char s_update_page[] =
     "<button id='go'>Upload firmware</button>"
     "<progress id='bar' max='100' value='0'></progress>"
     "<p id='status'>Waiting for firmware.</p>"
-    "</div><script>"
+    "</div>"
+    "<div class='card'><h2>Uplink Wi-Fi</h2>"
+    "<p>Join a hotspot/router during normal scouting for remote read-only monitoring.</p>"
+    "<form method='POST' action='/wifi'>"
+    "<input name='ssid' maxlength='32' placeholder='SSID'>"
+    "<input name='password' type='password' maxlength='63' placeholder='Password (blank for open Wi-Fi)'>"
+    "<button type='submit'>Save Wi-Fi &amp; reboot</button>"
+    "</form><p style='color:#94a3b8'>Leave SSID blank to disable uplink.</p></div>"
+    "<script>"
     "const f=document.getElementById('file'),s=document.getElementById('status'),"
     "b=document.getElementById('bar'),g=document.getElementById('go');"
     "g.onclick=()=>{"
@@ -124,6 +133,154 @@ static esp_err_t probe_get_handler(httpd_req_t *req)
     httpd_resp_set_status(req, "204 No Content");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, "", 0);
+}
+
+static int hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static void url_decode(const char *src, char *dst, size_t dst_size)
+{
+    if (!dst || dst_size == 0) {
+        return;
+    }
+
+    size_t out = 0;
+    const char *p = src ? src : "";
+
+    while (*p && out + 1 < dst_size) {
+        if (*p == '+') {
+            dst[out++] = ' ';
+            p++;
+            continue;
+        }
+
+        if (*p == '%' && p[1] && p[2]) {
+            int hi = hex_value(p[1]);
+            int lo = hex_value(p[2]);
+            if (hi >= 0 && lo >= 0) {
+                dst[out++] = (char)((hi << 4) | lo);
+                p += 3;
+                continue;
+            }
+        }
+
+        dst[out++] = *p++;
+    }
+
+    dst[out] = '\0';
+}
+
+static bool form_value(
+    const char *body,
+    const char *key,
+    char *decoded,
+    size_t decoded_size
+)
+{
+    if (!body || !key || !decoded || decoded_size == 0) {
+        return false;
+    }
+
+    size_t key_len = strlen(key);
+    const char *p = body;
+
+    while (*p) {
+        const char *entry_end = strchr(p, '&');
+        if (!entry_end) {
+            entry_end = p + strlen(p);
+        }
+
+        const char *equals = memchr(p, '=', (size_t)(entry_end - p));
+        if (equals && (size_t)(equals - p) == key_len && strncmp(p, key, key_len) == 0) {
+            size_t encoded_len = (size_t)(entry_end - equals - 1);
+            char encoded[128];
+
+            if (encoded_len >= sizeof(encoded)) {
+                return false;
+            }
+
+            memcpy(encoded, equals + 1, encoded_len);
+            encoded[encoded_len] = '\0';
+            url_decode(encoded, decoded, decoded_size);
+            return true;
+        }
+
+        p = *entry_end ? entry_end + 1 : entry_end;
+    }
+
+    return false;
+}
+
+static esp_err_t wifi_config_post_handler(httpd_req_t *req)
+{
+    if (req->content_len == 0 || req->content_len >= 256) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi form");
+        return ESP_FAIL;
+    }
+
+    char body[256];
+    size_t remaining = req->content_len;
+    size_t offset = 0;
+
+    while (remaining > 0) {
+        int received = httpd_req_recv(req, body + offset, remaining);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Form receive failed");
+            return ESP_FAIL;
+        }
+
+        offset += (size_t)received;
+        remaining -= (size_t)received;
+    }
+    body[offset] = '\0';
+
+    char ssid[33] = {0};
+    char password[64] = {0};
+
+    if (!form_value(body, "ssid", ssid, sizeof(ssid))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID missing");
+        return ESP_FAIL;
+    }
+    (void)form_value(body, "password", password, sizeof(password));
+
+    esp_err_t ret = ssid[0]
+        ? bandit_uplink_save_credentials(ssid, password)
+        : bandit_uplink_clear_credentials();
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "uplink credential save failed: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to save Wi-Fi");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "uplink configuration %s", ssid[0] ? "saved" : "cleared");
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(
+        req,
+        "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<body style='font-family:sans-serif;background:#090d12;color:#e2e8f0;padding:2rem'>"
+        "<h2>Wi-Fi saved</h2><p>C5 Bandit is rebooting into scout mode.</p></body>"
+    );
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    return ESP_OK;
 }
 
 static esp_err_t update_post_handler(httpd_req_t *req)
@@ -344,7 +501,7 @@ esp_err_t bandit_ota_start(void)
     // Keep OTA buffers off this task's stack, and retain extra headroom for
     // HTTP parsing, Wi-Fi/TCP callbacks, and response handling.
     server_config.stack_size = 12288;
-    server_config.max_uri_handlers = 4;
+    server_config.max_uri_handlers = 5;
     server_config.uri_match_fn = httpd_uri_match_wildcard;
 
     ret = httpd_start(&s_server, &server_config);
@@ -367,6 +524,13 @@ esp_err_t bandit_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t wifi_config = {
+        .uri = "/wifi",
+        .method = HTTP_POST,
+        .handler = wifi_config_post_handler,
+        .user_ctx = NULL,
+    };
+
     httpd_uri_t probe = {
         .uri = "/*",
         .method = HTTP_GET,
@@ -380,6 +544,11 @@ esp_err_t bandit_ota_start(void)
     }
 
     ret = httpd_register_uri_handler(s_server, &update);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = httpd_register_uri_handler(s_server, &wifi_config);
     if (ret != ESP_OK) {
         return ret;
     }
