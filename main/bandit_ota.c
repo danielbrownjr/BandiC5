@@ -96,7 +96,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static esp_err_t update_post_handler(httpd_req_t *req)
 {
-    if (req->content_len <= 0) {
+    if (req->content_len == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty firmware image");
         return ESP_FAIL;
     }
@@ -114,7 +114,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
 
     ESP_LOGI(
         TAG,
-        "OTA upload: %d bytes -> %s @ 0x%08lx",
+        "OTA upload: %zu bytes -> %s @ 0x%08lx",
         req->content_len,
         update_partition->label,
         (unsigned long)update_partition->address
@@ -129,12 +129,12 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     }
 
     char buffer[BANDIT_OTA_RECV_BUFFER];
-    int remaining = req->content_len;
-    int received_total = 0;
+    size_t remaining = req->content_len;
+    size_t received_total = 0;
     int last_percent = -1;
 
     while (remaining > 0) {
-        int to_read = remaining < (int)sizeof(buffer) ? remaining : (int)sizeof(buffer);
+        size_t to_read = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
         int received = httpd_req_recv(req, buffer, to_read);
 
         if (received == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -161,7 +161,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         received_total += received;
         remaining -= received;
 
-        int percent = (received_total * 100) / req->content_len;
+        int percent = (int)((received_total * 100U) / req->content_len);
         if (percent != last_percent && (percent == 100 || percent - last_percent >= 5)) {
             bandit_ui_set_ota_progress(percent, "UPLOADING");
             last_percent = percent;
