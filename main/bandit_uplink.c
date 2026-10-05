@@ -111,8 +111,8 @@ static const char s_status_page[] =
     "async function refreshLogs(){const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});const d=await r.json();"
     "box.replaceChildren();if(!d.available||!d.sessions.length){const s=document.createElement('span');s.className='muted';"
     "s.textContent=d.available?'No sessions found.':'TF card unavailable.';box.appendChild(s);return;}"
-    "for(const x of d.sessions){const a=document.createElement('a');a.className='log'+(x.active?' active':'');"
-    "a.href='/download?session='+x.index;a.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(x.bytes/1024))+' KiB'+(x.active?' \\u00b7 active':'');"
+    "for(const x of d.sessions){const a=document.createElement(x.active?'span':'a');a.className='log'+(x.active?' active':'');"
+    "if(!x.active)a.href='/download?session='+x.index;a.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(x.bytes/1024))+' KiB'+(x.active?' \\u00b7 active':'');"
     "box.appendChild(a);}}catch(e){box.replaceChildren();const s=document.createElement('span');s.className='muted';"
     "s.textContent='Session list temporarily unavailable';box.appendChild(s);}}"
     "tick();refreshAps();refreshLogs();setInterval(tick,2000);setInterval(refreshAps,2000);setInterval(refreshLogs,10000);"
@@ -462,6 +462,12 @@ static esp_err_t download_handler(httpd_req_t *req)
     if (ret != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid session path");
         return ret;
+    }
+
+    const char *active_path = bandit_storage_get_session_path();
+    if (active_path && active_path[0] && strcmp(path, active_path) == 0) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Active session is still being written");
     }
 
     FILE *file = fopen(path, "rb");
