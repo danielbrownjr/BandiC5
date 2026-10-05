@@ -270,6 +270,7 @@ static void wifi_event_handler(
         s_ip[0] = '\0';
         portEXIT_CRITICAL(&s_state_mux);
         bandit_ui_set_uplink_state(false);
+        bandit_ui_set_uplink_address(NULL);
         ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
     }
 }
@@ -298,6 +299,7 @@ static void ip_event_handler(
     portEXIT_CRITICAL(&s_state_mux);
 
     bandit_ui_set_uplink_state(true);
+    bandit_ui_set_uplink_address(ip);
     ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", s_ssid, ip);
 
     esp_err_t ret = start_status_server();
@@ -526,6 +528,7 @@ void bandit_uplink_stop(void)
     }
 
     bandit_ui_set_uplink_state(false);
+    bandit_ui_set_uplink_address(NULL);
 
     if (s_wifi_handler_registered) {
         esp_event_handler_instance_unregister(
