@@ -530,7 +530,7 @@ void bandit_uplink_stop(void)
         s_mdns_started = false;
     }
 
-    bandit_ui_set_uplink_state(false);
+    bandit_ui_set_uplink_state(false, false);
     bandit_ui_set_uplink_address(NULL);
 
     if (s_wifi_handler_registered) {
