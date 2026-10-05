@@ -82,6 +82,23 @@ The upload page streams the firmware directly into the inactive OTA slot, so it 
 
 OTA mode is intentionally local and physically initiated. It is not exposed during ordinary scanning.
 
+### HTTP task hardening
+
+A captured serial panic from the original bootstrap showed the OTA server crashing before any firmware upload began:
+
+- task: `httpd`
+- panic: stack protection fault
+- observed stack size: about 6 KiB
+- crash occurred on the first phone HTTP traffic after joining the updater AP
+
+The hardened updater build **`v0.2.3 OTA HTTPFIX`**:
+
+- moves the 4096-byte OTA receive buffer to heap
+- increases the HTTP server task stack to 12288 bytes
+- adds a wildcard GET probe handler that returns HTTP 204 for captive-portal/internet-check paths
+- logs the HTTP task stack high-water mark on root, probe, and upload entry
+- retains the exact ELF and map in CI artifacts for future address decoding
+
 ### OTA stack-overflow fix
 
 A physical OTA attempt exposed a stack-protection panic in the HTTP upload path. The original updater placed a 4096-byte receive buffer on a 6144-byte HTTP server task stack. The fix:
