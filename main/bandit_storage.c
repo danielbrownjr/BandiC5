@@ -1,7 +1,9 @@
 #include "bandit_storage.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -315,6 +317,119 @@ bandit_storage_state_t bandit_storage_get_state(void)
 const char *bandit_storage_get_session_path(void)
 {
     return s_session_path;
+}
+
+
+static int compare_session_desc(const void *left, const void *right)
+{
+    const bandit_storage_session_t *a = left;
+    const bandit_storage_session_t *b = right;
+
+    if (a->index < b->index) {
+        return 1;
+    }
+    if (a->index > b->index) {
+        return -1;
+    }
+    return 0;
+}
+
+esp_err_t bandit_storage_session_path(
+    unsigned index,
+    char *path,
+    size_t path_size
+)
+{
+    if (!path || path_size == 0 || index == 0 || index > BANDIT_SESSION_LIMIT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int written = snprintf(
+        path,
+        path_size,
+        BANDIT_LOG_DIR "/session-%04u.csv",
+        index
+    );
+
+    if (written <= 0 || written >= (int)path_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t bandit_storage_list_sessions(
+    bandit_storage_session_t *sessions,
+    size_t capacity,
+    size_t *count
+)
+{
+    if (!sessions || capacity == 0 || !count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *count = 0;
+
+    if (!s_mounted || s_state != BANDIT_STORAGE_READY) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    DIR *dir = opendir(BANDIT_LOG_DIR);
+    if (!dir) {
+        ESP_LOGW(TAG, "opendir %s failed: %s", BANDIT_LOG_DIR, strerror(errno));
+        return ESP_FAIL;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        unsigned index = 0;
+        int consumed = 0;
+
+        if (sscanf(entry->d_name, "session-%4u.csv%n", &index, &consumed) != 1 ||
+            entry->d_name[consumed] != '\0' ||
+            index == 0 ||
+            index > BANDIT_SESSION_LIMIT) {
+            continue;
+        }
+
+        char path[BANDIT_SESSION_PATH_MAX];
+        if (bandit_storage_session_path(index, path, sizeof(path)) != ESP_OK) {
+            continue;
+        }
+
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            continue;
+        }
+
+        bandit_storage_session_t candidate = {
+            .index = index,
+            .size_bytes = (size_t)st.st_size,
+            .active = strcmp(path, s_session_path) == 0,
+        };
+
+        if (*count < capacity) {
+            sessions[(*count)++] = candidate;
+            continue;
+        }
+
+        // Capacity is intentionally bounded for the web UI. Retain the newest
+        // session numbers if the card contains more files than fit in one page.
+        size_t oldest = 0;
+        for (size_t i = 1; i < capacity; i++) {
+            if (sessions[i].index < sessions[oldest].index) {
+                oldest = i;
+            }
+        }
+
+        if (candidate.index > sessions[oldest].index) {
+            sessions[oldest] = candidate;
+        }
+    }
+
+    closedir(dir);
+    qsort(sessions, *count, sizeof(*sessions), compare_session_desc);
+    return ESP_OK;
 }
 
 void bandit_storage_deinit(void)
