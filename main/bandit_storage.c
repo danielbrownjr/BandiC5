@@ -9,11 +9,13 @@
 
 #include "bsp/esp-bsp.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #define BANDIT_LOG_DIR BSP_SD_MOUNT_POINT "/bandic5"
 #define BANDIT_SESSION_PATH_MAX 96
 #define BANDIT_SESSION_LIMIT 9999
 #define BANDIT_FLUSH_SCAN_INTERVAL 3
+#define BANDIT_STORAGE_RETRY_MS 5000
 
 static const char *TAG = "bandit_storage";
 
@@ -22,16 +24,43 @@ static bandit_storage_state_t s_state = BANDIT_STORAGE_NO_CARD;
 static char s_session_path[BANDIT_SESSION_PATH_MAX];
 static uint32_t s_scans_since_flush;
 static bool s_mounted;
+static int64_t s_next_retry_ms;
+
+static int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static void schedule_retry(void)
+{
+    s_next_retry_ms = now_ms() + BANDIT_STORAGE_RETRY_MS;
+}
+
+static void teardown_storage(bandit_storage_state_t next_state)
+{
+    if (s_log_file) {
+        (void)fclose(s_log_file);
+        s_log_file = NULL;
+    }
+
+    if (s_mounted) {
+        esp_err_t ret = bsp_sdcard_unmount();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "TF unmount returned %s", esp_err_to_name(ret));
+        }
+        s_mounted = false;
+    }
+
+    s_state = next_state;
+    s_session_path[0] = '\0';
+    s_scans_since_flush = 0;
+}
 
 static void set_error(const char *reason)
 {
     ESP_LOGE(TAG, "%s", reason ? reason : "storage error");
-    s_state = BANDIT_STORAGE_ERROR;
-
-    if (s_log_file) {
-        fclose(s_log_file);
-        s_log_file = NULL;
-    }
+    teardown_storage(BANDIT_STORAGE_ERROR);
+    schedule_retry();
 }
 
 static esp_err_t flush_log(void)
@@ -115,42 +144,40 @@ static bool write_csv_text(FILE *file, const char *text)
     return fputc('"', file) != EOF;
 }
 
-esp_err_t bandit_storage_init(void)
+static esp_err_t start_session(void)
 {
-    s_state = BANDIT_STORAGE_NO_CARD;
-    s_session_path[0] = '\0';
-    s_scans_since_flush = 0;
-    s_mounted = false;
+    if (s_log_file || s_mounted) {
+        teardown_storage(BANDIT_STORAGE_NO_CARD);
+    }
 
     esp_err_t ret = bsp_sdcard_mount();
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TF card unavailable: %s", esp_err_to_name(ret));
+        s_state = BANDIT_STORAGE_NO_CARD;
+        s_session_path[0] = '\0';
+        schedule_retry();
         return ret;
     }
     s_mounted = true;
 
     ret = ensure_log_directory();
     if (ret != ESP_OK) {
-        (void)bsp_sdcard_unmount();
-        s_mounted = false;
-        s_state = BANDIT_STORAGE_ERROR;
+        teardown_storage(BANDIT_STORAGE_ERROR);
+        schedule_retry();
         return ret;
     }
 
     ret = choose_session_path();
     if (ret != ESP_OK) {
-        (void)bsp_sdcard_unmount();
-        s_mounted = false;
-        s_state = BANDIT_STORAGE_ERROR;
+        teardown_storage(BANDIT_STORAGE_ERROR);
+        schedule_retry();
         return ret;
     }
 
     s_log_file = fopen(s_session_path, "wb");
     if (!s_log_file) {
         ESP_LOGE(TAG, "open %s failed: %s", s_session_path, strerror(errno));
-        (void)bsp_sdcard_unmount();
-        s_mounted = false;
-        s_state = BANDIT_STORAGE_ERROR;
+        teardown_storage(BANDIT_STORAGE_ERROR);
+        schedule_retry();
         return ESP_FAIL;
     }
 
@@ -160,14 +187,52 @@ esp_err_t bandit_storage_init(void)
         ) == EOF ||
         flush_log() != ESP_OK) {
         set_error("failed to initialize session log");
-        (void)bsp_sdcard_unmount();
-        s_mounted = false;
         return ESP_FAIL;
     }
 
+    s_scans_since_flush = 0;
     s_state = BANDIT_STORAGE_READY;
+    s_next_retry_ms = 0;
+
     ESP_LOGI(TAG, "logging to %s", s_session_path);
     return ESP_OK;
+}
+
+esp_err_t bandit_storage_init(void)
+{
+    teardown_storage(BANDIT_STORAGE_NO_CARD);
+    s_next_retry_ms = 0;
+
+    esp_err_t ret = start_session();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "TF card unavailable: %s", esp_err_to_name(ret));
+    }
+
+    return ret;
+}
+
+void bandit_storage_service(void)
+{
+    if (s_state == BANDIT_STORAGE_READY) {
+        return;
+    }
+
+    const int64_t current_ms = now_ms();
+    if (s_next_retry_ms != 0 && current_ms < s_next_retry_ms) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "retrying TF card mount");
+
+    esp_err_t ret = start_session();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "TF card recovered");
+    } else {
+        // Absence is normal during hot-plug use; keep scanning and retry later.
+        s_state = BANDIT_STORAGE_NO_CARD;
+        schedule_retry();
+        ESP_LOGD(TAG, "TF retry unavailable: %s", esp_err_to_name(ret));
+    }
 }
 
 void bandit_storage_log_record(const bandit_scan_record_t *record, void *ctx)
@@ -253,16 +318,8 @@ void bandit_storage_deinit(void)
 {
     if (s_log_file) {
         (void)flush_log();
-        fclose(s_log_file);
-        s_log_file = NULL;
     }
 
-    if (s_mounted) {
-        (void)bsp_sdcard_unmount();
-        s_mounted = false;
-    }
-
-    s_state = BANDIT_STORAGE_NO_CARD;
-    s_session_path[0] = '\0';
-    s_scans_since_flush = 0;
+    teardown_storage(BANDIT_STORAGE_NO_CARD);
+    s_next_retry_ms = 0;
 }
