@@ -18,7 +18,9 @@ static lv_obj_t *s_strongest_value;
 static lv_obj_t *s_summary_value;
 static lv_obj_t *s_status;
 static lv_obj_t *s_storage_status;
-static lv_obj_t *s_uplink_status;
+static lv_obj_t *s_uplink_globe;
+static lv_obj_t *s_uplink_globe_vertical;
+static lv_obj_t *s_uplink_globe_horizontal;
 static lv_obj_t *s_subtitle;
 static lv_obj_t *s_ota_progress;
 static lv_obj_t *s_ota_status;
@@ -92,10 +94,33 @@ static void create_ui(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
 
-    s_uplink_status = lv_label_create(screen);
-    lv_label_set_text(s_uplink_status, "--");
-    lv_obj_set_style_text_color(s_uplink_status, lv_color_hex(0x475569), 0);
-    lv_obj_align(s_uplink_status, LV_ALIGN_TOP_LEFT, 6, 10);
+    // Compact uplink globe stays clear of the centered title. It is hidden
+    // when uplink is disabled, gray while configured/disconnected, and green
+    // while the STA has an IP address.
+    s_uplink_globe = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_uplink_globe);
+    lv_obj_set_size(s_uplink_globe, 14, 14);
+    lv_obj_align(s_uplink_globe, LV_ALIGN_TOP_LEFT, 7, 10);
+    lv_obj_set_style_bg_opa(s_uplink_globe, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_uplink_globe, 1, 0);
+    lv_obj_set_style_border_color(s_uplink_globe, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_radius(s_uplink_globe, 7, 0);
+    lv_obj_clear_flag(s_uplink_globe, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_uplink_globe, LV_OBJ_FLAG_HIDDEN);
+
+    s_uplink_globe_vertical = lv_obj_create(s_uplink_globe);
+    lv_obj_remove_style_all(s_uplink_globe_vertical);
+    lv_obj_set_size(s_uplink_globe_vertical, 1, 10);
+    lv_obj_align(s_uplink_globe_vertical, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_uplink_globe_vertical, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_bg_opa(s_uplink_globe_vertical, LV_OPA_COVER, 0);
+
+    s_uplink_globe_horizontal = lv_obj_create(s_uplink_globe);
+    lv_obj_remove_style_all(s_uplink_globe_horizontal);
+    lv_obj_set_size(s_uplink_globe_horizontal, 10, 1);
+    lv_obj_align(s_uplink_globe_horizontal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_uplink_globe_horizontal, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_bg_opa(s_uplink_globe_horizontal, LV_OPA_COVER, 0);
 
     s_storage_status = lv_label_create(screen);
     lv_label_set_text(s_storage_status, "--");
@@ -220,18 +245,27 @@ void bandit_ui_set_storage_state(bandit_ui_storage_state_t state)
     bsp_display_unlock();
 }
 
-void bandit_ui_set_uplink_state(bool connected)
+void bandit_ui_set_uplink_state(bool configured, bool connected)
 {
-    if (!s_uplink_status || !bsp_display_lock(0)) {
+    if (!s_uplink_globe || !bsp_display_lock(0)) {
         return;
     }
 
-    lv_label_set_text(s_uplink_status, connected ? "NET" : "--");
-    lv_obj_set_style_text_color(
-        s_uplink_status,
-        connected ? lv_color_hex(0x34d399) : lv_color_hex(0x475569),
-        0
-    );
+    if (!configured) {
+        lv_obj_add_flag(s_uplink_globe, LV_OBJ_FLAG_HIDDEN);
+        bsp_display_unlock();
+        return;
+    }
+
+    lv_obj_clear_flag(s_uplink_globe, LV_OBJ_FLAG_HIDDEN);
+
+    lv_color_t color = connected
+        ? lv_color_hex(0x34d399)
+        : lv_color_hex(0x475569);
+
+    lv_obj_set_style_border_color(s_uplink_globe, color, 0);
+    lv_obj_set_style_bg_color(s_uplink_globe_vertical, color, 0);
+    lv_obj_set_style_bg_color(s_uplink_globe_horizontal, color, 0);
 
     bsp_display_unlock();
 }
@@ -321,7 +355,9 @@ void bandit_ui_show_ota_mode(
     s_summary_value = NULL;
     s_status = NULL;
     s_storage_status = NULL;
-    s_uplink_status = NULL;
+    s_uplink_globe = NULL;
+    s_uplink_globe_vertical = NULL;
+    s_uplink_globe_horizontal = NULL;
     s_subtitle = NULL;
 
     lv_obj_t *title = lv_label_create(screen);
