@@ -228,8 +228,11 @@ void bandit_storage_service(void)
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "TF card recovered");
     } else {
-        // Absence is normal during hot-plug use; keep scanning and retry later.
-        s_state = BANDIT_STORAGE_NO_CARD;
+        // A mount failure means no usable card is present. Filesystem/open failures
+        // leave the ERROR state set by start_session() so the UI can distinguish them.
+        if (s_state != BANDIT_STORAGE_ERROR) {
+            s_state = BANDIT_STORAGE_NO_CARD;
+        }
         schedule_retry();
         ESP_LOGD(TAG, "TF retry unavailable: %s", esp_err_to_name(ret));
     }
