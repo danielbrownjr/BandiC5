@@ -8,6 +8,7 @@
 #include "bandit_scan.h"
 #include "bandit_storage.h"
 #include "bandit_ui.h"
+#include "bandit_uplink.h"
 #include "bandit_version.h"
 
 #define SCAN_TASK_STACK_SIZE (8 * 1024)
@@ -32,6 +33,9 @@ static bandit_ui_storage_state_t storage_ui_state(void)
 static void enter_ota_mode(void)
 {
     ESP_LOGI(TAG, "entering phone OTA update mode");
+
+    // Stop the normal uplink/status server before repurposing Wi-Fi for the updater AP.
+    bandit_uplink_stop();
 
     // Close and sync the active TF session before repurposing Wi-Fi for the updater.
     bandit_storage_deinit();
@@ -91,6 +95,7 @@ static void scan_task(void *arg)
             bandit_storage_finish_scan(snapshot.generation);
             bandit_ui_set_storage_state(storage_ui_state());
             bandit_ui_update(&snapshot);
+            bandit_uplink_publish_snapshot(&snapshot);
 
             ESP_LOGI(
                 TAG,
@@ -150,6 +155,11 @@ void app_main(void)
         bandit_ui_set_status("RADIO ERROR");
         bandit_ota_rollback_if_pending();
         return;
+    }
+
+    ret = bandit_uplink_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "uplink unavailable; continuing scout-only: %s", esp_err_to_name(ret));
     }
 
     ret = bandit_ota_button_init();
