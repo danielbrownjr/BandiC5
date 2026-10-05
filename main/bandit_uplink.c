@@ -422,7 +422,7 @@ esp_err_t bandit_uplink_init(void)
     }
 
     wifi_config_t config = {0};
-    snprintf((char *)config.sta.ssid, sizeof(config.sta.ssid), "%s", ssid);
+    memcpy(config.sta.ssid, ssid, strlen(ssid));
     snprintf((char *)config.sta.password, sizeof(config.sta.password), "%s", password);
     config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     config.sta.pmf_cfg.capable = true;
