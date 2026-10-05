@@ -15,6 +15,7 @@ static lv_obj_t *s_band5_bar;
 static lv_obj_t *s_strongest_value;
 static lv_obj_t *s_summary_value;
 static lv_obj_t *s_status;
+static lv_obj_t *s_storage_status;
 
 #if LVGL_VERSION_MAJOR >= 9
 static lv_obj_t *active_screen(void)
@@ -84,6 +85,11 @@ static void create_ui(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xf8fafc), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+
+    s_storage_status = lv_label_create(screen);
+    lv_label_set_text(s_storage_status, "--");
+    lv_obj_set_style_text_color(s_storage_status, lv_color_hex(0x475569), 0);
+    lv_obj_align(s_storage_status, LV_ALIGN_TOP_RIGHT, -6, 10);
 
     lv_obj_t *subtitle = lv_label_create(screen);
     lv_label_set_text(subtitle, "BandiC5 RF scout");
@@ -175,6 +181,31 @@ void bandit_ui_set_status(const char *status)
     }
 
     lv_label_set_text(s_status, status);
+    bsp_display_unlock();
+}
+
+void bandit_ui_set_storage_state(bandit_ui_storage_state_t state)
+{
+    if (!s_storage_status || !bsp_display_lock(0)) {
+        return;
+    }
+
+    switch (state) {
+    case BANDIT_UI_STORAGE_READY:
+        lv_label_set_text(s_storage_status, "SD");
+        lv_obj_set_style_text_color(s_storage_status, lv_color_hex(0x34d399), 0);
+        break;
+    case BANDIT_UI_STORAGE_ERROR:
+        lv_label_set_text(s_storage_status, "!!");
+        lv_obj_set_style_text_color(s_storage_status, lv_color_hex(0xf87171), 0);
+        break;
+    case BANDIT_UI_STORAGE_NONE:
+    default:
+        lv_label_set_text(s_storage_status, "--");
+        lv_obj_set_style_text_color(s_storage_status, lv_color_hex(0x475569), 0);
+        break;
+    }
+
     bsp_display_unlock();
 }
 
