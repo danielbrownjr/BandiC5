@@ -75,6 +75,9 @@ static void scan_task(void *arg)
             enter_ota_mode();
         }
 
+        bandit_storage_service();
+        bandit_ui_set_storage_state(storage_ui_state());
+
         bandit_scan_snapshot_t snapshot;
         bandit_ui_set_status("SCANNING");
 
