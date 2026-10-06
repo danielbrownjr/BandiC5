@@ -215,8 +215,8 @@ static esp_err_t status_json_handler(httpd_req_t *req)
     snapshot = s_snapshot;
     have_snapshot = s_have_snapshot;
     connected = s_connected;
-    snprintf(ssid, sizeof(ssid), "%s", s_ssid);
-    snprintf(ip, sizeof(ip), "%s", s_ip);
+    memcpy(ssid, s_ssid, sizeof(ssid));
+    memcpy(ip, s_ip, sizeof(ip));
     portEXIT_CRITICAL(&s_state_mux);
 
     char escaped_ssid[70];
