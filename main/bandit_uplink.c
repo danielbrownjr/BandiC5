@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -429,6 +430,25 @@ static esp_err_t logs_json_handler(httpd_req_t *req)
     return ret;
 }
 
+static esp_err_t send_all_raw(
+    httpd_req_t *req,
+    const char *data,
+    size_t length
+)
+{
+    while (length > 0) {
+        int sent = httpd_send(req, data, length);
+        if (sent <= 0) {
+            return ESP_FAIL;
+        }
+
+        data += sent;
+        length -= (size_t)sent;
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t download_handler(httpd_req_t *req)
 {
     size_t query_len = httpd_req_get_url_query_len(req);
@@ -470,62 +490,89 @@ static esp_err_t download_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "Active session is still being written");
     }
 
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size < 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+
     FILE *file = fopen(path, "rb");
     if (!file) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
         return ESP_ERR_NOT_FOUND;
     }
 
-    char disposition[64];
-    snprintf(
-        disposition,
-        sizeof(disposition),
-        "attachment; filename=\"session-%04lu.csv\"",
+    // ESP-IDF's chunked response helper necessarily emits
+    // Transfer-Encoding: chunked. Mobile download managers may report that
+    // as an unknown/-1 byte attachment. Completed CSVs already have a stable
+    // length, so frame the response explicitly with Content-Length while
+    // still streaming the file in small chunks from TF.
+    char header[384];
+    int header_len = snprintf(
+        header,
+        sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/csv; charset=utf-8\r\n"
+        "Content-Length: %lld\r\n"
+        "Content-Disposition: attachment; filename=\"session-%04lu.csv\"\r\n"
+        "Cache-Control: no-store\r\n"
+        "\r\n",
+        (long long)st.st_size,
         parsed
     );
 
-    httpd_resp_set_type(req, "text/csv; charset=utf-8");
-    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (header_len <= 0 || header_len >= (int)sizeof(header)) {
+        fclose(file);
+        return ESP_FAIL;
+    }
+
+    ret = send_all_raw(req, header, (size_t)header_len);
+    if (ret != ESP_OK) {
+        fclose(file);
+        return ret;
+    }
 
     char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
     if (!buffer) {
         fclose(file);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_ERR_NO_MEM;
     }
 
-    while (1) {
-        size_t read_count = fread(
-            buffer,
-            1,
-            BANDIT_UPLINK_DOWNLOAD_BUFFER,
-            file
-        );
+    size_t total_sent = 0;
+    while (total_sent < (size_t)st.st_size) {
+        size_t remaining = (size_t)st.st_size - total_sent;
+        size_t request = remaining < BANDIT_UPLINK_DOWNLOAD_BUFFER
+            ? remaining
+            : BANDIT_UPLINK_DOWNLOAD_BUFFER;
 
-        if (read_count > 0) {
-            ret = httpd_resp_send_chunk(req, buffer, read_count);
-            if (ret != ESP_OK) {
-                break;
-            }
-        }
-
-        if (read_count < BANDIT_UPLINK_DOWNLOAD_BUFFER) {
-            if (ferror(file)) {
-                ESP_LOGW(TAG, "read failed while downloading %s", path);
-                ret = ESP_FAIL;
-            }
+        size_t read_count = fread(buffer, 1, request, file);
+        if (read_count == 0) {
+            ESP_LOGW(TAG, "short read while downloading %s", path);
+            ret = ESP_FAIL;
             break;
         }
+
+        ret = send_all_raw(req, buffer, read_count);
+        if (ret != ESP_OK) {
+            break;
+        }
+
+        total_sent += read_count;
+    }
+
+    if (ret == ESP_OK && total_sent != (size_t)st.st_size) {
+        ESP_LOGW(
+            TAG,
+            "download size mismatch for %s: expected=%lld sent=%zu",
+            path,
+            (long long)st.st_size,
+            total_sent
+        );
+        ret = ESP_FAIL;
     }
 
     free(buffer);
     fclose(file);
-
-    if (ret == ESP_OK) {
-        ret = httpd_resp_send_chunk(req, NULL, 0);
-    }
-
     return ret;
 }
 
