@@ -53,6 +53,7 @@ static bandit_scan_snapshot_t s_snapshot;
 static bool s_have_snapshot;
 
 static SemaphoreHandle_t s_ap_mutex;
+static SemaphoreHandle_t s_radio_mutex;
 static bandit_scan_record_t s_work_aps[BANDIT_UPLINK_AP_CACHE_MAX];
 static size_t s_work_ap_count;
 static size_t s_work_seen;
@@ -103,12 +104,12 @@ static const char s_status_page[] =
     "$('strong').textContent=d.strongest+' \\u00b7 '+d.rssi+' dBm \\u00b7 CH '+d.channel;"
     "$('summary').textContent='TOTAL '+d.total+' \\u00b7 OPEN '+d.open+' \\u00b7 HIDDEN '+d.hidden+' \\u00b7 SCAN #'+d.scan;"
     "$('storage').textContent='Storage: '+d.storage+' \\u00b7 uptime '+Math.floor(d.uptime_ms/1000)+' s';"
-    "}catch(e){$('net').textContent='Status temporarily unavailable';}}"
+    "}catch(e){/* retain last-known status while HTTP server is busy */}}"
     "async function refreshAps(){try{const r=await fetch('/aps.json',{cache:'no-store'});const d=await r.json();"
     "const b=$('aps');b.replaceChildren();for(const a of d.aps){const tr=document.createElement('tr');"
     "cell(tr,a.ssid);cell(tr,a.bssid);cell(tr,a.band);cell(tr,a.channel);cell(tr,a.rssi+' dBm');cell(tr,a.auth);b.appendChild(tr);}"
     "$('apsmeta').textContent='Scan #'+d.scan+' \\u00b7 '+d.aps.length+' shown'+(d.truncated?' \\u00b7 strongest '+d.aps.length+' only':'');"
-    "}catch(e){$('apsmeta').textContent='AP table temporarily unavailable';}}"
+    "}catch(e){/* retain last complete AP table while HTTP server is busy */}}"
     "async function refreshLogs(){const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});const d=await r.json();"
     "box.replaceChildren();if(!d.available||!d.sessions.length){const s=document.createElement('span');s.className='muted';"
     "s.textContent=d.available?'No sessions found.':'TF card unavailable.';box.appendChild(s);return;}"
@@ -502,6 +503,23 @@ static esp_err_t download_handler(httpd_req_t *req)
         return ESP_ERR_NOT_FOUND;
     }
 
+    char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
+    if (!buffer) {
+        fclose(file);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Wait for any active RF sweep to finish, then hold the radio on the STA's
+    // home channel for the duration of the completed-session transfer.
+    if (!s_radio_mutex ||
+        xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(15000)) != pdTRUE) {
+        free(buffer);
+        fclose(file);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Radio busy; try the download again");
+    }
+
     // ESP-IDF's chunked response helper necessarily emits
     // Transfer-Encoding: chunked. Mobile download managers may report that
     // as an unknown/-1 byte attachment. Completed CSVs already have a stable
@@ -522,20 +540,18 @@ static esp_err_t download_handler(httpd_req_t *req)
     );
 
     if (header_len <= 0 || header_len >= (int)sizeof(header)) {
+        xSemaphoreGive(s_radio_mutex);
+        free(buffer);
         fclose(file);
         return ESP_FAIL;
     }
 
     ret = send_all_raw(req, header, (size_t)header_len);
     if (ret != ESP_OK) {
+        xSemaphoreGive(s_radio_mutex);
+        free(buffer);
         fclose(file);
         return ret;
-    }
-
-    char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
-    if (!buffer) {
-        fclose(file);
-        return ESP_ERR_NO_MEM;
     }
 
     size_t total_sent = 0;
@@ -571,6 +587,7 @@ static esp_err_t download_handler(httpd_req_t *req)
         ret = ESP_FAIL;
     }
 
+    xSemaphoreGive(s_radio_mutex);
     free(buffer);
     fclose(file);
     return ret;
@@ -811,6 +828,13 @@ esp_err_t bandit_uplink_init(void)
         }
     }
 
+    if (!s_radio_mutex) {
+        s_radio_mutex = xSemaphoreCreateMutex();
+        if (!s_radio_mutex) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     char password[64] = {0};
     char ssid[33] = {0};
 
@@ -959,8 +983,19 @@ void bandit_uplink_stop(void)
 
 void bandit_uplink_begin_scan(void)
 {
+    if (s_radio_mutex) {
+        xSemaphoreTake(s_radio_mutex, portMAX_DELAY);
+    }
+
     s_work_ap_count = 0;
     s_work_seen = 0;
+}
+
+void bandit_uplink_end_scan(void)
+{
+    if (s_radio_mutex) {
+        xSemaphoreGive(s_radio_mutex);
+    }
 }
 
 void bandit_uplink_observe_record(const bandit_scan_record_t *record)
