@@ -254,6 +254,25 @@ stalled at zero bytes when an active dual-band scan moved the STA off-channel.
 The web UI also retains the last known status/table during brief server-busy
 periods instead of replacing good data with a transient unavailable message.
 
+
+### Browser-managed CSV downloads
+
+v0.4.3 removes the hand-framed fixed-length HTTP response used in v0.4.1/v0.4.2.
+Completed-session CSVs are again sent with ESP-IDF's supported chunked response
+API, but the status page now fetches the file itself, tracks received bytes
+against the known session size, assembles a browser Blob, and triggers the local
+download only after the transfer completes.
+
+While a file transfer is active:
+- normal status/AP/session polling is paused
+- the shared radio mutex prevents new RF sweeps
+- the HTTP send timeout is extended to 20 seconds
+- polling and scanning resume automatically after success or failure
+
+This avoids mobile download-manager quirks around local chunked attachments and
+also avoids leaving the ESP-IDF HTTP server in an inconsistent state after a
+manually framed response.
+
 ### v0.3.1 recovery landmark
 
 The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
