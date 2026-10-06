@@ -232,6 +232,14 @@ Session metadata is available from:
 
 CSV files are streamed in small chunks rather than loaded into RAM.
 
+
+### Mobile CSV download framing
+
+v0.4.1 changes completed-session downloads from HTTP chunked transfer to a fixed
+`Content-Length` response. The file is still streamed from TF in 2 KiB pieces,
+but mobile browsers/download managers can now display the real attachment size
+instead of `-1 byte` / unknown length.
+
 ### v0.3.1 recovery landmark
 
 The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
