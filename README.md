@@ -240,6 +240,20 @@ v0.4.1 changes completed-session downloads from HTTP chunked transfer to a fixed
 but mobile browsers/download managers can now display the real attachment size
 instead of `-1 byte` / unknown length.
 
+
+### Single-radio CSV transfer guard
+
+v0.4.2 serializes active RF scans and completed-session downloads with a shared
+radio mutex. A download waits for any current channel sweep to finish, then
+temporarily keeps the single ESP32-C5 Wi-Fi radio on the associated AP's home
+channel while streaming the CSV. RF scanning resumes automatically as soon as
+the transfer ends.
+
+This addresses mobile transfers that received the correct `Content-Length` but
+stalled at zero bytes when an active dual-band scan moved the STA off-channel.
+The web UI also retains the last known status/table during brief server-busy
+periods instead of replacing good data with a transient unavailable message.
+
 ### v0.3.1 recovery landmark
 
 The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
