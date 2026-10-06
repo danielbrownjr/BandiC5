@@ -27,6 +27,7 @@
 #define BANDIT_OTA_POLL_MS 100
 #define BANDIT_OTA_BUTTON_TASK_STACK 3072
 #define BANDIT_OTA_RECV_BUFFER 4096
+#define BANDIT_OTA_MAX_RECV_TIMEOUTS 6
 #define BANDIT_OTA_REBOOT_DELAY_MS 4000
 
 static const char *TAG = "bandit_ota";
@@ -233,10 +234,16 @@ static esp_err_t wifi_config_post_handler(httpd_req_t *req)
     char body[384];
     size_t remaining = req->content_len;
     size_t offset = 0;
+    unsigned timeout_count = 0;
 
     while (remaining > 0) {
         int received = httpd_req_recv(req, body + offset, remaining);
         if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            timeout_count++;
+            if (timeout_count >= BANDIT_OTA_MAX_RECV_TIMEOUTS) {
+                httpd_resp_set_status(req, "408 Request Timeout");
+                return httpd_resp_sendstr(req, "Wi-Fi form receive timed out");
+            }
             continue;
         }
         if (received <= 0) {
@@ -244,6 +251,7 @@ static esp_err_t wifi_config_post_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
 
+        timeout_count = 0;
         offset += (size_t)received;
         remaining -= (size_t)received;
     }
@@ -335,6 +343,7 @@ static esp_err_t update_post_handler(httpd_req_t *req)
     size_t remaining = req->content_len;
     size_t received_total = 0;
     int last_percent = -1;
+    unsigned timeout_count = 0;
 
     while (remaining > 0) {
         size_t to_read = remaining < BANDIT_OTA_RECV_BUFFER
@@ -343,6 +352,15 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         int received = httpd_req_recv(req, buffer, to_read);
 
         if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            timeout_count++;
+            if (timeout_count >= BANDIT_OTA_MAX_RECV_TIMEOUTS) {
+                ESP_LOGE(TAG, "firmware upload timed out");
+                esp_ota_abort(ota_handle);
+                free(buffer);
+                bandit_ui_set_ota_progress(0, "UPLOAD TIMEOUT");
+                httpd_resp_set_status(req, "408 Request Timeout");
+                return httpd_resp_sendstr(req, "Firmware upload timed out");
+            }
             continue;
         }
 
@@ -354,6 +372,8 @@ static esp_err_t update_post_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload interrupted");
             return ESP_FAIL;
         }
+
+        timeout_count = 0;
 
         ret = esp_ota_write(ota_handle, buffer, received);
         if (ret != ESP_OK) {
