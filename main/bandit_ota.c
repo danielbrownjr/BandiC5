@@ -589,26 +589,30 @@ esp_err_t bandit_ota_start(void)
     return ESP_OK;
 }
 
-void bandit_ota_confirm_running_image(void)
+bool bandit_ota_confirm_running_image(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!running) {
-        return;
+        return false;
     }
 
     esp_ota_img_states_t state;
     if (esp_ota_get_state_partition(running, &state) != ESP_OK) {
-        return;
+        return false;
     }
 
-    if (state == ESP_OTA_IMG_PENDING_VERIFY) {
-        esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "confirmed OTA image %s as valid", running->label);
-        } else {
-            ESP_LOGE(TAG, "failed to confirm OTA image: %s", esp_err_to_name(ret));
-        }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return true;
     }
+
+    esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "confirmed OTA image %s as valid", running->label);
+        return true;
+    }
+
+    ESP_LOGE(TAG, "failed to confirm OTA image: %s", esp_err_to_name(ret));
+    return false;
 }
 
 void bandit_ota_rollback_if_pending(void)
