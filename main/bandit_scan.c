@@ -136,23 +136,30 @@ esp_err_t bandit_scan_once(
     ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&scan_cfg, true), TAG, "scan failed");
 
     uint16_t ap_count = 0;
-    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&ap_count), TAG, "AP count failed");
+    esp_err_t ret = esp_wifi_scan_get_ap_num(&ap_count);
+    if (ret != ESP_OK) {
+        (void)esp_wifi_clear_ap_list();
+        return ret;
+    }
 
     snapshot->generation = ++s_generation;
     snapshot->total = ap_count;
 
     if (ap_count == 0) {
+        (void)esp_wifi_clear_ap_list();
         return ESP_OK;
     }
 
     wifi_ap_record_t *records = calloc(ap_count, sizeof(*records));
     if (!records) {
+        (void)esp_wifi_clear_ap_list();
         return ESP_ERR_NO_MEM;
     }
 
     uint16_t record_count = ap_count;
-    esp_err_t ret = esp_wifi_scan_get_ap_records(&record_count, records);
+    ret = esp_wifi_scan_get_ap_records(&record_count, records);
     if (ret != ESP_OK) {
+        (void)esp_wifi_clear_ap_list();
         free(records);
         return ret;
     }
