@@ -9,8 +9,9 @@
 esp_err_t bandit_uplink_init(void);
 void bandit_uplink_service(void);
 void bandit_uplink_stop(void);
-void bandit_uplink_begin_scan(void);
+bool bandit_uplink_try_begin_scan(void);
 void bandit_uplink_end_scan(void);
+bool bandit_uplink_first_attempt_resolved(void);
 void bandit_uplink_observe_record(const bandit_scan_record_t *record);
 void bandit_uplink_publish_snapshot(const bandit_scan_snapshot_t *snapshot);
 
