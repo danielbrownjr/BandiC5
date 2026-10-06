@@ -78,7 +78,8 @@ static const char s_status_page[] =
     "th{color:#94a3b8;font-weight:600}td:first-child{max-width:18rem;overflow:hidden;text-overflow:ellipsis}"
     ".logs{display:flex;flex-wrap:wrap;gap:.55rem;margin-top:.7rem}"
     ".log{display:inline-block;padding:.55rem .7rem;border:1px solid #334155;border-radius:9px;"
-    "color:#93c5fd;text-decoration:none}.log.active{border-color:#34d399;color:#6ee7b7}"
+    "color:#93c5fd;text-decoration:none;background:transparent;font:inherit;cursor:pointer}.log:disabled{cursor:default;opacity:.9}"
+    ".log.active{border-color:#34d399;color:#6ee7b7}"
     "@media(max-width:520px){body{margin:1rem auto}.card{padding:.85rem}table{font-size:.82rem}}"
     "</style></head><body>"
     "<h1>C5 Bandit</h1><div class='muted' id='ver'>loading...</div>"
@@ -95,9 +96,9 @@ static const char s_status_page[] =
     "<div class='card'><b>TF sessions</b><div class='muted'>Newest 32 sessions; active log may lag by the flush interval.</div>"
     "<div class='logs' id='logs'><span class='muted'>loading...</span></div></div>"
     "<script>"
-    "const $=id=>document.getElementById(id);"
+    "const $=id=>document.getElementById(id);let transferBusy=false;"
     "function cell(tr,v){const d=document.createElement('td');d.textContent=v;tr.appendChild(d);}"
-    "async function tick(){try{const r=await fetch('/status.json',{cache:'no-store'});const d=await r.json();"
+    "async function tick(){if(transferBusy)return;try{const r=await fetch('/status.json',{cache:'no-store'});const d=await r.json();"
     "$('ver').textContent=d.version;"
     "$('net').textContent=(d.connected?'Connected':'Disconnected')+' to '+d.ssid+' \\u00b7 '+(d.ip||'no IP');"
     "$('g24').textContent=d.ap24+' AP';$('g5').textContent=d.ap5+' AP';"
@@ -105,18 +106,32 @@ static const char s_status_page[] =
     "$('summary').textContent='TOTAL '+d.total+' \\u00b7 OPEN '+d.open+' \\u00b7 HIDDEN '+d.hidden+' \\u00b7 SCAN #'+d.scan;"
     "$('storage').textContent='Storage: '+d.storage+' \\u00b7 uptime '+Math.floor(d.uptime_ms/1000)+' s';"
     "}catch(e){/* retain last-known status while HTTP server is busy */}}"
-    "async function refreshAps(){try{const r=await fetch('/aps.json',{cache:'no-store'});const d=await r.json();"
+    "async function refreshAps(){if(transferBusy)return;try{const r=await fetch('/aps.json',{cache:'no-store'});const d=await r.json();"
     "const b=$('aps');b.replaceChildren();for(const a of d.aps){const tr=document.createElement('tr');"
     "cell(tr,a.ssid);cell(tr,a.bssid);cell(tr,a.band);cell(tr,a.channel);cell(tr,a.rssi+' dBm');cell(tr,a.auth);b.appendChild(tr);}"
     "$('apsmeta').textContent='Scan #'+d.scan+' \\u00b7 '+d.aps.length+' shown'+(d.truncated?' \\u00b7 strongest '+d.aps.length+' only':'');"
     "}catch(e){/* retain last complete AP table while HTTP server is busy */}}"
-    "async function refreshLogs(){const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});const d=await r.json();"
+    "async function refreshLogs(){if(transferBusy)return;const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});const d=await r.json();"
     "box.replaceChildren();if(!d.available||!d.sessions.length){const s=document.createElement('span');s.className='muted';"
     "s.textContent=d.available?'No sessions found.':'TF card unavailable.';box.appendChild(s);return;}"
-    "for(const x of d.sessions){const a=document.createElement(x.active?'span':'a');a.className='log'+(x.active?' active':'');"
-    "if(!x.active)a.href='/download?session='+x.index;a.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(x.bytes/1024))+' KiB'+(x.active?' \\u00b7 active':'');"
+    "for(const x of d.sessions){const a=document.createElement(x.active?'span':'button');a.className='log'+(x.active?' active':'');"
+    "if(!x.active){a.type='button';a.addEventListener('click',()=>downloadSession(x,a));}"
+    "a.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(x.bytes/1024))+' KiB'+(x.active?' \\u00b7 active':'');"
     "box.appendChild(a);}}catch(e){box.replaceChildren();const s=document.createElement('span');s.className='muted';"
     "s.textContent='Session list temporarily unavailable';box.appendChild(s);}}"
+    "async function downloadSession(x,b){if(transferBusy)return;transferBusy=true;b.disabled=true;"
+    "const total=x.bytes||0;const totalKiB=Math.max(1,Math.round(total/1024));"
+    "try{b.textContent=x.name+' \\u00b7 starting...';const r=await fetch('/download?session='+x.index,{cache:'no-store'});"
+    "if(!r.ok)throw new Error('HTTP '+r.status);let blob;"
+    "if(r.body&&r.body.getReader){const rd=r.body.getReader(),parts=[];let got=0;"
+    "while(true){const q=await rd.read();if(q.done)break;parts.push(q.value);got+=q.value.byteLength;"
+    "b.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(got/1024))+'/'+totalKiB+' KiB';}"
+    "blob=new Blob(parts,{type:'text/csv;charset=utf-8'});}else{blob=await r.blob();}"
+    "if(total&&blob.size!==total)throw new Error('size mismatch');"
+    "const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=x.name;document.body.appendChild(a);a.click();a.remove();"
+    "setTimeout(()=>URL.revokeObjectURL(u),5000);b.textContent=x.name+' \\u00b7 downloaded';"
+    "}catch(e){b.textContent=x.name+' \\u00b7 retry';}"
+    "finally{transferBusy=false;b.disabled=false;setTimeout(()=>{tick();refreshAps();refreshLogs();},250);}}"
     "tick();refreshAps();refreshLogs();setInterval(tick,2000);setInterval(refreshAps,2000);setInterval(refreshLogs,10000);"
     "</script></body></html>";
 
@@ -431,25 +446,6 @@ static esp_err_t logs_json_handler(httpd_req_t *req)
     return ret;
 }
 
-static esp_err_t send_all_raw(
-    httpd_req_t *req,
-    const char *data,
-    size_t length
-)
-{
-    while (length > 0) {
-        int sent = httpd_send(req, data, length);
-        if (sent <= 0) {
-            return ESP_FAIL;
-        }
-
-        data += sent;
-        length -= (size_t)sent;
-    }
-
-    return ESP_OK;
-}
-
 static esp_err_t download_handler(httpd_req_t *req)
 {
     size_t query_len = httpd_req_get_url_query_len(req);
@@ -510,8 +506,6 @@ static esp_err_t download_handler(httpd_req_t *req)
         return ESP_ERR_NO_MEM;
     }
 
-    // Wait for any active RF sweep to finish, then hold the radio on the STA's
-    // home channel for the duration of the completed-session transfer.
     if (!s_radio_mutex ||
         xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(15000)) != pdTRUE) {
         free(buffer);
@@ -520,39 +514,25 @@ static esp_err_t download_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "Radio busy; try the download again");
     }
 
-    // ESP-IDF's chunked response helper necessarily emits
-    // Transfer-Encoding: chunked. Mobile download managers may report that
-    // as an unknown/-1 byte attachment. Completed CSVs already have a stable
-    // length, so frame the response explicitly with Content-Length while
-    // still streaming the file in small chunks from TF.
-    char header[384];
-    int header_len = snprintf(
-        header,
-        sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/csv; charset=utf-8\r\n"
-        "Content-Length: %lld\r\n"
-        "Content-Disposition: attachment; filename=\"session-%04lu.csv\"\r\n"
-        "Cache-Control: no-store\r\n"
-        "\r\n",
-        (long long)st.st_size,
+    char disposition[64];
+    char size_header[24];
+    snprintf(
+        disposition,
+        sizeof(disposition),
+        "attachment; filename=\"session-%04lu.csv\"",
         parsed
     );
+    snprintf(
+        size_header,
+        sizeof(size_header),
+        "%lld",
+        (long long)st.st_size
+    );
 
-    if (header_len <= 0 || header_len >= (int)sizeof(header)) {
-        xSemaphoreGive(s_radio_mutex);
-        free(buffer);
-        fclose(file);
-        return ESP_FAIL;
-    }
-
-    ret = send_all_raw(req, header, (size_t)header_len);
-    if (ret != ESP_OK) {
-        xSemaphoreGive(s_radio_mutex);
-        free(buffer);
-        fclose(file);
-        return ret;
-    }
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-BandiC5-File-Size", size_header);
 
     size_t total_sent = 0;
     while (total_sent < (size_t)st.st_size) {
@@ -568,28 +548,34 @@ static esp_err_t download_handler(httpd_req_t *req)
             break;
         }
 
-        ret = send_all_raw(req, buffer, read_count);
+        ret = httpd_resp_send_chunk(req, buffer, read_count);
         if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "send failed while downloading %s", path);
             break;
         }
 
         total_sent += read_count;
     }
 
-    if (ret == ESP_OK && total_sent != (size_t)st.st_size) {
-        ESP_LOGW(
-            TAG,
-            "download size mismatch for %s: expected=%lld sent=%zu",
-            path,
-            (long long)st.st_size,
-            total_sent
-        );
+    if (ret == ESP_OK && total_sent == (size_t)st.st_size) {
+        ret = httpd_resp_send_chunk(req, NULL, 0);
+    } else if (ret == ESP_OK) {
         ret = ESP_FAIL;
     }
 
     xSemaphoreGive(s_radio_mutex);
     free(buffer);
     fclose(file);
+
+    ESP_LOGI(
+        TAG,
+        "download session=%04lu bytes=%zu/%lld result=%s",
+        parsed,
+        total_sent,
+        (long long)st.st_size,
+        esp_err_to_name(ret)
+    );
+
     return ret;
 }
 
@@ -602,6 +588,7 @@ static esp_err_t start_status_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = BANDIT_UPLINK_HTTP_STACK;
     config.max_uri_handlers = 5;
+    config.send_wait_timeout = 20;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
