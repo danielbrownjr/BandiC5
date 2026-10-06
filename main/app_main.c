@@ -3,6 +3,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "esp_system.h"
 
 #include "bandit_ota.h"
