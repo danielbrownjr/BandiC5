@@ -277,6 +277,70 @@ manually framed response.
 
 The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
 
+## v0.4.4 hardening RC
+
+This release-candidate pass follows an adversarial whole-repository review and
+focuses on concurrency, recovery, and long-run reliability rather than adding
+new user-facing features.
+
+### TF/FAT lifetime safety
+
+The storage module now owns a mutex and explicit completed-session reader leases.
+
+- storage state becomes unavailable before unmount begins
+- FAT/VFS unmount is deferred while any web reader is still open
+- no new completed-session reader can open after teardown starts
+- web downloads use storage-owned open/read/close wrappers instead of touching
+  FATFS directly
+- session listing is serialized with teardown and stats only the newest retained
+  entries
+- session allocation scans the directory once for the highest canonical session
+  number instead of probing every number with repeated `stat()`
+- session names must exactly match `session-NNNN.csv`
+- failed initial session creation removes the incomplete file
+- CSV cells beginning with spreadsheet formula trigger characters are prefixed
+  to prevent formula execution when logs are opened in spreadsheet software
+
+### Scout/uplink arbitration
+
+Radio ownership is now nonblocking from the scout control loop.
+
+- scans use a try-lock instead of waiting forever behind a browser transfer
+- the control loop continues servicing BOOT/OTA, storage recovery, and uplink
+  state while the radio is busy
+- uplink connection attempts have an explicit connecting state and a 3-second
+  bounded opportunity before the radio returns to scouting
+- scan-start `ESP_ERR_WIFI_STATE` is treated as a deferral rather than a hard
+  scan error
+- DHCP lost-IP events are handled
+- Wi-Fi configuration uses RAM storage; the BandiC5 NVS namespace remains the
+  credential source of truth
+
+### HTTP reliability
+
+- status server enables LRU socket purge and TCP keepalive
+- completed CSV transfers are bounded to 30 seconds server-side
+- browser-side fetches are also aborted after 30 seconds
+- normal page polling pauses during a CSV transfer
+- downloads retain the radio guard but can no longer park the main control loop
+
+### OTA and event-task hardening
+
+- HTTP and mDNS startup moved out of the ESP-IDF system event task
+- Wi-Fi/IP event callbacks now only update small state flags
+- update and Wi-Fi-config POST receives abort after six consecutive socket
+  timeouts instead of wedging update mode indefinitely
+- pending OTA images are no longer confirmed immediately after task creation
+- confirmation waits for a successful scan/publish path, a 30-second healthy
+  runtime window, and resolution of the first uplink attempt when configured
+- failed confirmation is retried rather than latched as successful
+
+### Scan failure cleanup
+
+Wi-Fi driver AP lists are explicitly cleared on count/allocation/retrieval
+failure paths so a dense-environment allocation failure does not retain the
+driver's scan result memory.
+
 ## Build
 
 The project targets **ESP-IDF v5.5.5** and **esp32c5**.
