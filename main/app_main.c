@@ -100,6 +100,7 @@ static void scan_task(void *arg)
             handle_scan_record,
             NULL
         );
+        bandit_uplink_end_scan();
 
         if (ret == ESP_OK) {
             bandit_storage_finish_scan(snapshot.generation);
