@@ -1,4 +1,4 @@
 #pragma once
 
-#define BANDIT_VERSION "v0.4.2 WEB DL RADIO"
-#define BANDIT_VERSION_SHORT "v0.4.2"
+#define BANDIT_VERSION "v0.4.3 WEB DL FETCH"
+#define BANDIT_VERSION_SHORT "v0.4.3"
