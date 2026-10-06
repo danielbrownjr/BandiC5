@@ -29,6 +29,8 @@
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 15000
+#define BANDIT_UPLINK_CONNECT_TIMEOUT_MS 10000
+#define BANDIT_UPLINK_DOWNLOAD_MAX_MS 30000
 #define BANDIT_UPLINK_HTTP_STACK 8192
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
 #define BANDIT_UPLINK_SESSION_LIST_MAX 32
@@ -38,10 +40,15 @@ static const char *TAG = "bandit_uplink";
 
 static volatile bool s_enabled;
 static bool s_connected;
+static bool s_connecting;
+static bool s_first_attempt_resolved;
+static bool s_services_pending;
+static bool s_state_dirty;
 static char s_ssid[33];
 static char s_ip[16];
 static httpd_handle_t s_server;
 static int64_t s_next_retry_ms;
+static int64_t s_connect_deadline_ms;
 static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static bool s_wifi_handler_registered;
@@ -470,48 +477,41 @@ static esp_err_t download_handler(httpd_req_t *req)
         return ESP_ERR_INVALID_ARG;
     }
 
-    char path[96];
-    esp_err_t ret = bandit_storage_session_path(
-        (unsigned)parsed,
-        path,
-        sizeof(path)
-    );
-    if (ret != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid session path");
-        return ret;
-    }
-
-    const char *active_path = bandit_storage_get_session_path();
-    if (active_path && active_path[0] && strcmp(path, active_path) == 0) {
-        httpd_resp_set_status(req, "409 Conflict");
-        return httpd_resp_sendstr(req, "Active session is still being written");
-    }
-
-    struct stat st;
-    if (stat(path, &st) != 0 || st.st_size < 0) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    FILE *file = fopen(path, "rb");
-    if (!file) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
-        return ESP_ERR_NOT_FOUND;
-    }
-
     char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
     if (!buffer) {
-        fclose(file);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_ERR_NO_MEM;
     }
 
-    if (!s_radio_mutex ||
+    if (s_radio_mutex &&
         xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(15000)) != pdTRUE) {
         free(buffer);
-        fclose(file);
         httpd_resp_set_status(req, "503 Service Unavailable");
         return httpd_resp_sendstr(req, "Radio busy; try the download again");
+    }
+
+    bandit_storage_reader_t *reader = NULL;
+    size_t file_size = 0;
+    esp_err_t ret = bandit_storage_open_completed_session(
+        (unsigned)parsed,
+        &reader,
+        &file_size
+    );
+    if (ret != ESP_OK) {
+        if (s_radio_mutex) {
+            xSemaphoreGive(s_radio_mutex);
+        }
+        free(buffer);
+
+        if (ret == ESP_ERR_NOT_FOUND) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
+        } else if (ret == ESP_ERR_INVALID_STATE) {
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req, "Session unavailable or still active");
+        } else {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to open session");
+        }
+        return ret;
     }
 
     char disposition[64];
@@ -522,57 +522,75 @@ static esp_err_t download_handler(httpd_req_t *req)
         "attachment; filename=\"session-%04lu.csv\"",
         parsed
     );
-    snprintf(
-        size_header,
-        sizeof(size_header),
-        "%lld",
-        (long long)st.st_size
-    );
+    snprintf(size_header, sizeof(size_header), "%zu", file_size);
 
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Disposition", disposition);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-BandiC5-File-Size", size_header);
 
+    const int64_t started_ms = esp_timer_get_time() / 1000;
     size_t total_sent = 0;
-    while (total_sent < (size_t)st.st_size) {
-        size_t remaining = (size_t)st.st_size - total_sent;
+
+    while (total_sent < file_size) {
+        if ((esp_timer_get_time() / 1000) - started_ms >
+            BANDIT_UPLINK_DOWNLOAD_MAX_MS) {
+            ESP_LOGW(TAG, "download timed out: session=%04lu", parsed);
+            ret = ESP_ERR_TIMEOUT;
+            break;
+        }
+
+        size_t remaining = file_size - total_sent;
         size_t request = remaining < BANDIT_UPLINK_DOWNLOAD_BUFFER
             ? remaining
             : BANDIT_UPLINK_DOWNLOAD_BUFFER;
 
-        size_t read_count = fread(buffer, 1, request, file);
+        bool eof = false;
+        size_t read_count = bandit_storage_read_completed_session(
+            reader,
+            buffer,
+            request,
+            &eof
+        );
+
         if (read_count == 0) {
-            ESP_LOGW(TAG, "short read while downloading %s", path);
+            ESP_LOGW(
+                TAG,
+                "short read while downloading session=%04lu eof=%d",
+                parsed,
+                eof
+            );
             ret = ESP_FAIL;
             break;
         }
 
         ret = httpd_resp_send_chunk(req, buffer, read_count);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "send failed while downloading %s", path);
+            ESP_LOGW(TAG, "send failed while downloading session=%04lu", parsed);
             break;
         }
 
         total_sent += read_count;
     }
 
-    if (ret == ESP_OK && total_sent == (size_t)st.st_size) {
+    if (ret == ESP_OK && total_sent == file_size) {
         ret = httpd_resp_send_chunk(req, NULL, 0);
     } else if (ret == ESP_OK) {
         ret = ESP_FAIL;
     }
 
-    xSemaphoreGive(s_radio_mutex);
+    bandit_storage_close_completed_session(reader);
+    if (s_radio_mutex) {
+        xSemaphoreGive(s_radio_mutex);
+    }
     free(buffer);
-    fclose(file);
 
     ESP_LOGI(
         TAG,
-        "download session=%04lu bytes=%zu/%lld result=%s",
+        "download session=%04lu bytes=%zu/%zu result=%s",
         parsed,
         total_sent,
-        (long long)st.st_size,
+        file_size,
         esp_err_to_name(ret)
     );
 
@@ -589,6 +607,11 @@ static esp_err_t start_status_server(void)
     config.stack_size = BANDIT_UPLINK_HTTP_STACK;
     config.max_uri_handlers = 5;
     config.send_wait_timeout = 20;
+    config.lru_purge_enable = true;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 10;
+    config.keep_alive_interval = 3;
+    config.keep_alive_count = 3;
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -658,19 +681,21 @@ static void wifi_event_handler(
     (void)event_base;
     (void)event_data;
 
-    if (!s_enabled) {
+    if (!s_enabled || event_id != WIFI_EVENT_STA_DISCONNECTED) {
         return;
     }
 
-    if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        portENTER_CRITICAL(&s_state_mux);
-        s_connected = false;
-        s_ip[0] = '\0';
-        portEXIT_CRITICAL(&s_state_mux);
-        bandit_ui_set_uplink_state(true, false);
-        bandit_ui_set_uplink_address(NULL);
-        ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
-    }
+    const int64_t current_ms = esp_timer_get_time() / 1000;
+
+    portENTER_CRITICAL(&s_state_mux);
+    s_connected = false;
+    s_connecting = false;
+    s_first_attempt_resolved = true;
+    s_services_pending = false;
+    s_state_dirty = true;
+    s_ip[0] = '\0';
+    s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+    portEXIT_CRITICAL(&s_state_mux);
 }
 
 static void ip_event_handler(
@@ -683,38 +708,38 @@ static void ip_event_handler(
     (void)arg;
     (void)event_base;
 
-    if (!s_enabled || event_id != IP_EVENT_STA_GOT_IP) {
+    if (!s_enabled) {
         return;
     }
 
-    const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
-    char ip[16];
-    snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
+        char ip[16];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&event->ip_info.ip));
 
-    portENTER_CRITICAL(&s_state_mux);
-    s_connected = true;
-    snprintf(s_ip, sizeof(s_ip), "%s", ip);
-    portEXIT_CRITICAL(&s_state_mux);
+        portENTER_CRITICAL(&s_state_mux);
+        s_connected = true;
+        s_connecting = false;
+        s_first_attempt_resolved = true;
+        s_services_pending = true;
+        s_state_dirty = true;
+        snprintf(s_ip, sizeof(s_ip), "%s", ip);
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
+    }
 
-    bandit_ui_set_uplink_state(true, true);
-    bandit_ui_set_uplink_address(ip);
-    ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", s_ssid, ip);
+    if (event_id == IP_EVENT_STA_LOST_IP) {
+        const int64_t current_ms = esp_timer_get_time() / 1000;
 
-    esp_err_t ret = start_status_server();
-    if (ret == ESP_OK) {
-        if (!s_mdns_started) {
-            esp_err_t mdns_ret = mdns_init();
-            if (mdns_ret == ESP_OK) {
-                (void)mdns_hostname_set("bandic5");
-                (void)mdns_instance_name_set("C5 Bandit");
-                (void)mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
-                s_mdns_started = true;
-            } else {
-                ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(mdns_ret));
-            }
-        }
-
-        ESP_LOGI(TAG, "status page ready: http://%s/ (try http://bandic5.local/)", ip);
+        portENTER_CRITICAL(&s_state_mux);
+        s_connected = false;
+        s_connecting = false;
+        s_first_attempt_resolved = true;
+        s_services_pending = false;
+        s_state_dirty = true;
+        s_ip[0] = '\0';
+        s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+        portEXIT_CRITICAL(&s_state_mux);
     }
 }
 
@@ -827,6 +852,9 @@ esp_err_t bandit_uplink_init(void)
 
     esp_err_t ret = load_credentials(ssid, password);
     if (ret == ESP_ERR_NVS_NOT_FOUND || (ret == ESP_OK && ssid[0] == '\0')) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_first_attempt_resolved = true;
+        portEXIT_CRITICAL(&s_state_mux);
         bandit_ui_set_uplink_state(false, false);
         ESP_LOGI(TAG, "uplink not configured");
         return ESP_OK;
@@ -865,19 +893,26 @@ esp_err_t bandit_uplink_init(void)
 
     ret = esp_event_handler_instance_register(
         IP_EVENT,
-        IP_EVENT_STA_GOT_IP,
+        ESP_EVENT_ANY_ID,
         ip_event_handler,
         NULL,
         &s_ip_handler
     );
     if (ret != ESP_OK) {
-        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, s_wifi_handler);
+        esp_event_handler_instance_unregister(
+            WIFI_EVENT,
+            WIFI_EVENT_STA_DISCONNECTED,
+            s_wifi_handler
+        );
         s_wifi_handler_registered = false;
         return ret;
     }
     s_ip_handler_registered = true;
 
-    ret = esp_wifi_set_config(WIFI_IF_STA, &config);
+    ret = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (ret == ESP_OK) {
+        ret = esp_wifi_set_config(WIFI_IF_STA, &config);
+    }
     if (ret != ESP_OK) {
         bandit_uplink_stop();
         return ret;
@@ -887,12 +922,17 @@ esp_err_t bandit_uplink_init(void)
     snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
     s_ip[0] = '\0';
     s_connected = false;
+    s_connecting = false;
+    s_first_attempt_resolved = false;
+    s_services_pending = false;
+    s_state_dirty = true;
+    s_next_retry_ms = 0;
+    s_connect_deadline_ms = 0;
     portEXIT_CRITICAL(&s_state_mux);
 
     s_enabled = true;
     bandit_ui_set_uplink_state(true, false);
-
-    s_next_retry_ms = 0;
+    bandit_ui_set_uplink_address(NULL);
 
     ESP_LOGI(TAG, "uplink enabled for SSID=%s; first connect follows initial RF scan", s_ssid);
     return ESP_OK;
@@ -904,32 +944,125 @@ void bandit_uplink_service(void)
         return;
     }
 
+    const int64_t current_ms = esp_timer_get_time() / 1000;
     bool connected;
+    bool connecting;
+    bool state_dirty;
+    bool services_pending;
+    int64_t next_retry_ms;
+    int64_t connect_deadline_ms;
+    char ssid[33];
+    char ip[16];
+
     portENTER_CRITICAL(&s_state_mux);
     connected = s_connected;
+    connecting = s_connecting;
+    state_dirty = s_state_dirty;
+    services_pending = s_services_pending;
+    next_retry_ms = s_next_retry_ms;
+    connect_deadline_ms = s_connect_deadline_ms;
+    memcpy(ssid, s_ssid, sizeof(ssid));
+    memcpy(ip, s_ip, sizeof(ip));
+    s_state_dirty = false;
+    s_services_pending = false;
     portEXIT_CRITICAL(&s_state_mux);
 
+    if (state_dirty) {
+        bandit_ui_set_uplink_state(true, connected);
+        bandit_ui_set_uplink_address(connected ? ip : NULL);
+
+        if (connected) {
+            ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", ssid, ip);
+        } else {
+            ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
+        }
+    }
+
     if (connected) {
+        if (services_pending) {
+            esp_err_t ret = start_status_server();
+            if (ret == ESP_OK && !s_mdns_started) {
+                esp_err_t mdns_ret = mdns_init();
+                if (mdns_ret == ESP_OK) {
+                    (void)mdns_hostname_set("bandic5");
+                    (void)mdns_instance_name_set("C5 Bandit");
+                    (void)mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+                    s_mdns_started = true;
+                } else {
+                    ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(mdns_ret));
+                }
+            }
+
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "status page ready: http://%s/ (try http://bandic5.local/)", ip);
+            } else {
+                portENTER_CRITICAL(&s_state_mux);
+                s_services_pending = true;
+                portEXIT_CRITICAL(&s_state_mux);
+            }
+        }
         return;
     }
 
-    const int64_t current_ms = esp_timer_get_time() / 1000;
-    if (s_next_retry_ms != 0 && current_ms < s_next_retry_ms) {
+    if (connecting) {
+        if (current_ms < connect_deadline_ms) {
+            return;
+        }
+
+        ESP_LOGW(TAG, "uplink connect attempt timed out; returning radio to scout");
+        (void)esp_wifi_disconnect();
+
+        portENTER_CRITICAL(&s_state_mux);
+        s_connecting = false;
+        s_first_attempt_resolved = true;
+        s_state_dirty = true;
+        s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
+    }
+
+    if (next_retry_ms != 0 && current_ms < next_retry_ms) {
         return;
     }
 
     esp_err_t ret = esp_wifi_connect();
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_CONN && ret != ESP_ERR_WIFI_STATE) {
-        ESP_LOGD(TAG, "uplink connect attempt: %s", esp_err_to_name(ret));
+    if (ret == ESP_OK || ret == ESP_ERR_WIFI_STATE) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_connecting = true;
+        s_connect_deadline_ms = current_ms + BANDIT_UPLINK_CONNECT_TIMEOUT_MS;
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
     }
 
+    ESP_LOGD(TAG, "uplink connect attempt failed immediately: %s", esp_err_to_name(ret));
+    portENTER_CRITICAL(&s_state_mux);
+    s_connecting = false;
+    s_first_attempt_resolved = true;
     s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+    portEXIT_CRITICAL(&s_state_mux);
 }
 
 void bandit_uplink_stop(void)
 {
     s_enabled = false;
-    s_next_retry_ms = 0;
+
+    if (s_wifi_handler_registered) {
+        esp_event_handler_instance_unregister(
+            WIFI_EVENT,
+            WIFI_EVENT_STA_DISCONNECTED,
+            s_wifi_handler
+        );
+        s_wifi_handler_registered = false;
+    }
+
+    if (s_ip_handler_registered) {
+        esp_event_handler_instance_unregister(
+            IP_EVENT,
+            ESP_EVENT_ANY_ID,
+            s_ip_handler
+        );
+        s_ip_handler_registered = false;
+    }
 
     if (s_server) {
         httpd_stop(s_server);
@@ -944,38 +1077,49 @@ void bandit_uplink_stop(void)
     bandit_ui_set_uplink_state(false, false);
     bandit_ui_set_uplink_address(NULL);
 
-    if (s_wifi_handler_registered) {
-        esp_event_handler_instance_unregister(
-            WIFI_EVENT,
-            WIFI_EVENT_STA_DISCONNECTED,
-            s_wifi_handler
-        );
-        s_wifi_handler_registered = false;
-    }
-
-    if (s_ip_handler_registered) {
-        esp_event_handler_instance_unregister(
-            IP_EVENT,
-            IP_EVENT_STA_GOT_IP,
-            s_ip_handler
-        );
-        s_ip_handler_registered = false;
-    }
-
     portENTER_CRITICAL(&s_state_mux);
     s_connected = false;
+    s_connecting = false;
+    s_first_attempt_resolved = true;
+    s_services_pending = false;
+    s_state_dirty = false;
+    s_next_retry_ms = 0;
+    s_connect_deadline_ms = 0;
     s_ip[0] = '\0';
     portEXIT_CRITICAL(&s_state_mux);
 }
 
-void bandit_uplink_begin_scan(void)
+bool bandit_uplink_try_begin_scan(void)
 {
-    if (s_radio_mutex) {
-        xSemaphoreTake(s_radio_mutex, portMAX_DELAY);
+    bool connecting = false;
+
+    portENTER_CRITICAL(&s_state_mux);
+    connecting = s_connecting;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if (connecting) {
+        return false;
+    }
+
+    if (s_radio_mutex &&
+        xSemaphoreTake(s_radio_mutex, 0) != pdTRUE) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_state_mux);
+    connecting = s_connecting;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if (connecting) {
+        if (s_radio_mutex) {
+            xSemaphoreGive(s_radio_mutex);
+        }
+        return false;
     }
 
     s_work_ap_count = 0;
     s_work_seen = 0;
+    return true;
 }
 
 void bandit_uplink_end_scan(void)
@@ -983,6 +1127,15 @@ void bandit_uplink_end_scan(void)
     if (s_radio_mutex) {
         xSemaphoreGive(s_radio_mutex);
     }
+}
+
+
+bool bandit_uplink_first_attempt_resolved(void)
+{
+    portENTER_CRITICAL(&s_state_mux);
+    bool resolved = !s_enabled || s_first_attempt_resolved;
+    portEXIT_CRITICAL(&s_state_mux);
+    return resolved;
 }
 
 void bandit_uplink_observe_record(const bandit_scan_record_t *record)
