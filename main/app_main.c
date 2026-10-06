@@ -2,6 +2,7 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_system.h"
 
 #include "bandit_ota.h"
@@ -14,6 +15,7 @@
 #define SCAN_TASK_STACK_SIZE (8 * 1024)
 #define SCAN_INTERVAL_MS 3500
 #define OTA_REQUEST_POLL_MS 100
+#define OTA_CONFIRM_HEALTH_MS 30000
 
 static const char *TAG = "bandic5";
 
@@ -83,6 +85,10 @@ static void scan_task(void *arg)
 {
     (void)arg;
 
+    bool first_scan_ok = false;
+    bool ota_confirmed = false;
+    int64_t healthy_since_ms = 0;
+
     while (1) {
         if (bandit_ota_requested()) {
             enter_ota_mode();
@@ -92,8 +98,14 @@ static void scan_task(void *arg)
         bandit_ui_set_storage_state(storage_ui_state());
 
         bandit_scan_snapshot_t snapshot;
+
+        if (!bandit_uplink_try_begin_scan()) {
+            bandit_ui_set_status("RADIO BUSY");
+            wait_for_next_scan_or_ota();
+            continue;
+        }
+
         bandit_ui_set_status("SCANNING");
-        bandit_uplink_begin_scan();
 
         esp_err_t ret = bandit_scan_once(
             &snapshot,
@@ -108,6 +120,11 @@ static void scan_task(void *arg)
             bandit_ui_update(&snapshot);
             bandit_uplink_publish_snapshot(&snapshot);
 
+            if (!first_scan_ok) {
+                first_scan_ok = true;
+                healthy_since_ms = esp_timer_get_time() / 1000;
+            }
+
             ESP_LOGI(
                 TAG,
                 "scan=%lu aps=%u 2g=%u 5g=%u strongest=%s rssi=%d ch=%u",
@@ -119,10 +136,22 @@ static void scan_task(void *arg)
                 snapshot.strongest_rssi,
                 snapshot.strongest_channel
             );
+        } else if (ret == ESP_ERR_WIFI_STATE) {
+            ESP_LOGW(TAG, "scan deferred while Wi-Fi driver is busy");
+            bandit_ui_set_storage_state(storage_ui_state());
+            bandit_ui_set_status("SCAN DEFER");
         } else {
             ESP_LOGE(TAG, "scan failed: %s", esp_err_to_name(ret));
             bandit_ui_set_storage_state(storage_ui_state());
             bandit_ui_set_status("SCAN ERROR");
+        }
+
+        if (!ota_confirmed &&
+            first_scan_ok &&
+            bandit_uplink_first_attempt_resolved() &&
+            (esp_timer_get_time() / 1000) - healthy_since_ms >= OTA_CONFIRM_HEALTH_MS) {
+            bandit_ota_confirm_running_image();
+            ota_confirmed = true;
         }
 
         if (bandit_ota_requested()) {
@@ -149,7 +178,13 @@ void app_main(void)
     bandit_ui_set_storage_state(storage_ui_state());
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "TF logging enabled: %s", bandit_storage_get_session_path());
+        char session_path[96];
+        if (bandit_storage_get_session_path(
+                session_path,
+                sizeof(session_path)
+            ) == ESP_OK) {
+            ESP_LOGI(TAG, "TF logging enabled: %s", session_path);
+        }
     } else {
         ESP_LOGW(
             TAG,
@@ -197,7 +232,6 @@ void app_main(void)
         return;
     }
 
-    // A newly OTA-flashed image is accepted only after display, radio, OTA trigger,
-    // and the main scan task have all initialized successfully.
-    bandit_ota_confirm_running_image();
+    // Pending OTA images are confirmed by scan_task only after real runtime
+    // behavior has been exercised for the health window.
 }
