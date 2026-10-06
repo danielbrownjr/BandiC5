@@ -150,8 +150,7 @@ static void scan_task(void *arg)
             first_scan_ok &&
             bandit_uplink_first_attempt_resolved() &&
             (esp_timer_get_time() / 1000) - healthy_since_ms >= OTA_CONFIRM_HEALTH_MS) {
-            bandit_ota_confirm_running_image();
-            ota_confirmed = true;
+            ota_confirmed = bandit_ota_confirm_running_image();
         }
 
         if (bandit_ota_requested()) {
