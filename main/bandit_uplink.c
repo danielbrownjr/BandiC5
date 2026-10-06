@@ -29,7 +29,7 @@
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 15000
-#define BANDIT_UPLINK_CONNECT_TIMEOUT_MS 10000
+#define BANDIT_UPLINK_CONNECT_TIMEOUT_MS 3000
 #define BANDIT_UPLINK_DOWNLOAD_MAX_MS 30000
 #define BANDIT_UPLINK_HTTP_STACK 8192
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
@@ -128,7 +128,8 @@ static const char s_status_page[] =
     "s.textContent='Session list temporarily unavailable';box.appendChild(s);}}"
     "async function downloadSession(x,b){if(transferBusy)return;transferBusy=true;b.disabled=true;"
     "const total=x.bytes||0;const totalKiB=Math.max(1,Math.round(total/1024));"
-    "try{b.textContent=x.name+' \\u00b7 starting...';const r=await fetch('/download?session='+x.index,{cache:'no-store'});"
+    "const ctl=new AbortController(),kill=setTimeout(()=>ctl.abort(),30000);"
+    "try{b.textContent=x.name+' \\u00b7 starting...';const r=await fetch('/download?session='+x.index,{cache:'no-store',signal:ctl.signal});"
     "if(!r.ok)throw new Error('HTTP '+r.status);let blob;"
     "if(r.body&&r.body.getReader){const rd=r.body.getReader(),parts=[];let got=0;"
     "while(true){const q=await rd.read();if(q.done)break;parts.push(q.value);got+=q.value.byteLength;"
@@ -138,7 +139,7 @@ static const char s_status_page[] =
     "const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=x.name;document.body.appendChild(a);a.click();a.remove();"
     "setTimeout(()=>URL.revokeObjectURL(u),5000);b.textContent=x.name+' \\u00b7 downloaded';"
     "}catch(e){b.textContent=x.name+' \\u00b7 retry';}"
-    "finally{transferBusy=false;b.disabled=false;setTimeout(()=>{tick();refreshAps();refreshLogs();},250);}}"
+    "finally{clearTimeout(kill);transferBusy=false;b.disabled=false;setTimeout(()=>{tick();refreshAps();refreshLogs();},250);}}"
     "tick();refreshAps();refreshLogs();setInterval(tick,2000);setInterval(refreshAps,2000);setInterval(refreshLogs,10000);"
     "</script></body></html>";
 
