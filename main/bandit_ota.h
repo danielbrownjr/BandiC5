@@ -12,5 +12,5 @@ esp_err_t bandit_ota_button_init(void);
 bool bandit_ota_requested(void);
 esp_err_t bandit_ota_start(void);
 
-void bandit_ota_confirm_running_image(void);
+bool bandit_ota_confirm_running_image(void);
 void bandit_ota_rollback_if_pending(void);

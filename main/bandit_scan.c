@@ -136,37 +136,39 @@ esp_err_t bandit_scan_once(
     ESP_RETURN_ON_ERROR(esp_wifi_scan_start(&scan_cfg, true), TAG, "scan failed");
 
     uint16_t ap_count = 0;
-    ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&ap_count), TAG, "AP count failed");
+    esp_err_t ret = esp_wifi_scan_get_ap_num(&ap_count);
+    if (ret != ESP_OK) {
+        (void)esp_wifi_clear_ap_list();
+        return ret;
+    }
 
     snapshot->generation = ++s_generation;
     snapshot->total = ap_count;
 
     if (ap_count == 0) {
+        (void)esp_wifi_clear_ap_list();
         return ESP_OK;
-    }
-
-    wifi_ap_record_t *records = calloc(ap_count, sizeof(*records));
-    if (!records) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    uint16_t record_count = ap_count;
-    esp_err_t ret = esp_wifi_scan_get_ap_records(&record_count, records);
-    if (ret != ESP_OK) {
-        free(records);
-        return ret;
     }
 
     const int64_t observed_ms = esp_timer_get_time() / 1000;
 
-    for (uint16_t i = 0; i < record_count; i++) {
-        const wifi_ap_record_t *record = &records[i];
-        const bool hidden = record->ssid[0] == 0;
+    // Consume one driver-owned AP record at a time. ESP-IDF frees each record
+    // as it is fetched, avoiding a second ap_count-sized application buffer
+    // while the Wi-Fi driver's scan list is still resident in internal RAM.
+    for (uint16_t i = 0; i < ap_count; i++) {
+        wifi_ap_record_t record;
+        ret = esp_wifi_scan_get_ap_record(&record);
+        if (ret != ESP_OK) {
+            (void)esp_wifi_clear_ap_list();
+            return ret;
+        }
+
+        const bool hidden = record.ssid[0] == 0;
         char ssid[33];
 
-        ssid_to_text(record->ssid, ssid);
+        ssid_to_text(record.ssid, ssid);
 
-        if (record->primary > 14) {
+        if (record.primary > 14) {
             snapshot->count_5g++;
         } else {
             snapshot->count_2g++;
@@ -176,13 +178,13 @@ esp_err_t bandit_scan_once(
             snapshot->hidden++;
         }
 
-        if (record->authmode == WIFI_AUTH_OPEN) {
+        if (record.authmode == WIFI_AUTH_OPEN) {
             snapshot->open++;
         }
 
-        if (record->rssi > snapshot->strongest_rssi) {
-            snapshot->strongest_rssi = record->rssi;
-            snapshot->strongest_channel = record->primary;
+        if (record.rssi > snapshot->strongest_rssi) {
+            snapshot->strongest_rssi = record.rssi;
+            snapshot->strongest_channel = record.primary;
             snprintf(
                 snapshot->strongest_ssid,
                 sizeof(snapshot->strongest_ssid),
@@ -193,7 +195,7 @@ esp_err_t bandit_scan_once(
                 snapshot->strongest_auth,
                 sizeof(snapshot->strongest_auth),
                 "%s",
-                auth_name(record->authmode)
+                auth_name(record.authmode)
             );
         }
 
@@ -201,24 +203,23 @@ esp_err_t bandit_scan_once(
             bandit_scan_record_t emitted = {
                 .generation = snapshot->generation,
                 .uptime_ms = observed_ms,
-                .rssi = record->rssi,
-                .channel = record->primary,
+                .rssi = record.rssi,
+                .channel = record.primary,
                 .hidden = hidden,
             };
 
-            memcpy(emitted.bssid, record->bssid, sizeof(emitted.bssid));
+            memcpy(emitted.bssid, record.bssid, sizeof(emitted.bssid));
             snprintf(emitted.ssid, sizeof(emitted.ssid), "%s", ssid);
             snprintf(
                 emitted.auth,
                 sizeof(emitted.auth),
                 "%s",
-                auth_name(record->authmode)
+                auth_name(record.authmode)
             );
 
             record_callback(&emitted, record_callback_ctx);
         }
     }
 
-    free(records);
     return ESP_OK;
 }
