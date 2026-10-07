@@ -226,6 +226,17 @@ static bool form_value(
 
 static esp_err_t wifi_config_post_handler(httpd_req_t *req)
 {
+    // If this is a freshly OTA-booted image, reaching this handler proves the
+    // recovery AP and HTTP server are alive. Confirm before any reboot path.
+    if (!bandit_ota_confirm_running_image()) {
+        httpd_resp_send_err(
+            req,
+            HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Unable to confirm running image"
+        );
+        return ESP_FAIL;
+    }
+
     if (req->content_len == 0 || req->content_len >= 384) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi form");
         return ESP_FAIL;
@@ -294,6 +305,18 @@ static esp_err_t wifi_config_post_handler(httpd_req_t *req)
 
 static esp_err_t update_post_handler(httpd_req_t *req)
 {
+    // A request can race the control task's post-start confirmation by a tiny
+    // window. Confirm here too so esp_ota_begin() is never attempted while the
+    // current image is still PENDING_VERIFY.
+    if (!bandit_ota_confirm_running_image()) {
+        httpd_resp_send_err(
+            req,
+            HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Unable to confirm running image"
+        );
+        return ESP_FAIL;
+    }
+
     ESP_LOGI(
         TAG,
         "HTTP OTA upload start, stack high water=%u",
