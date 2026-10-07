@@ -2,6 +2,7 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
@@ -19,6 +20,19 @@
 #define OTA_CONFIRM_HEALTH_MS 30000
 
 static const char *TAG = "bandic5";
+
+static void log_runtime_heap(const char *where)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGI(
+        TAG,
+        "HEAP %s free=%u min=%u largest=%u",
+        where ? where : "?",
+        (unsigned)heap_caps_get_free_size(caps),
+        (unsigned)heap_caps_get_minimum_free_size(caps),
+        (unsigned)heap_caps_get_largest_free_block(caps)
+    );
+}
 
 static bandit_ui_storage_state_t storage_ui_state(void)
 {
@@ -117,12 +131,14 @@ static void scan_task(void *arg)
         }
 
         bandit_ui_set_status("SCANNING");
+        log_runtime_heap("pre-scan");
 
         esp_err_t ret = bandit_scan_once(
             &snapshot,
             handle_scan_record,
             NULL
         );
+        log_runtime_heap(ret == ESP_OK ? "post-scan-ok" : "post-scan-fail");
         bandit_uplink_end_scan();
 
         if (ret == ESP_OK) {
