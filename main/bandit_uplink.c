@@ -29,7 +29,7 @@
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 15000
-#define BANDIT_UPLINK_ASSOC_TIMEOUT_MS 12000
+#define BANDIT_UPLINK_ASSOC_TIMEOUT_MS 15000
 #define BANDIT_UPLINK_DHCP_TIMEOUT_MS 10000
 #define BANDIT_UPLINK_HTTP_STACK 8192
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
@@ -732,6 +732,7 @@ static void wifi_event_handler(
     s_services_pending = false;
     s_state_dirty = true;
     s_ip[0] = '\0';
+    s_connect_deadline_ms = 0;
     s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
     portEXIT_CRITICAL(&s_state_mux);
 }
@@ -762,6 +763,7 @@ static void ip_event_handler(
         s_first_attempt_resolved = true;
         s_services_pending = true;
         s_state_dirty = true;
+        s_connect_deadline_ms = 0;
         memcpy(s_ip, ip, sizeof(s_ip));
         portEXIT_CRITICAL(&s_state_mux);
         return;
@@ -1123,15 +1125,22 @@ void bandit_uplink_service(void)
 
     ESP_LOGD(TAG, "uplink connect attempt failed immediately: %s", esp_err_to_name(ret));
 
+    bool connected_after_call;
     portENTER_CRITICAL(&s_state_mux);
-    s_connecting = false;
-    s_associated = false;
-    s_first_attempt_resolved = true;
-    s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+    connected_after_call = s_connected;
+    if (!connected_after_call) {
+        s_connecting = false;
+        s_associated = false;
+        s_first_attempt_resolved = true;
+        s_connect_deadline_ms = 0;
+        s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+    }
     portEXIT_CRITICAL(&s_state_mux);
 
-    xSemaphoreGive(s_radio_mutex);
-    s_connect_radio_owned = false;
+    if (!connected_after_call) {
+        xSemaphoreGive(s_radio_mutex);
+        s_connect_radio_owned = false;
+    }
 }
 
 void bandit_uplink_stop(void)
