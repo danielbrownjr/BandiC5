@@ -14,6 +14,7 @@
 
 #include "esp_event.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -31,12 +32,25 @@
 #define BANDIT_UPLINK_RETRY_MS 15000
 #define BANDIT_UPLINK_ASSOC_TIMEOUT_MS 15000
 #define BANDIT_UPLINK_DHCP_TIMEOUT_MS 10000
-#define BANDIT_UPLINK_HTTP_STACK 8192
+#define BANDIT_UPLINK_HTTP_STACK 4096
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
 #define BANDIT_UPLINK_SESSION_LIST_MAX 32
 #define BANDIT_UPLINK_DOWNLOAD_BUFFER 2048
 
 static const char *TAG = "bandit_uplink";
+
+static void log_uplink_heap(const char *where)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGI(
+        TAG,
+        "HEAP %s free=%u min=%u largest=%u",
+        where,
+        (unsigned)heap_caps_get_free_size(caps),
+        (unsigned)heap_caps_get_minimum_free_size(caps),
+        (unsigned)heap_caps_get_largest_free_block(caps)
+    );
+}
 
 static volatile bool s_enabled;
 static bool s_connected;
@@ -643,7 +657,9 @@ static esp_err_t start_status_server(void)
     config.keep_alive_interval = 3;
     config.keep_alive_count = 3;
 
+    log_uplink_heap("pre-http-start");
     esp_err_t ret = httpd_start(&s_server, &config);
+    log_uplink_heap(ret == ESP_OK ? "post-http-start-ok" : "post-http-start-fail");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "status server start failed: %s", esp_err_to_name(ret));
         s_server = NULL;
@@ -1043,7 +1059,9 @@ void bandit_uplink_service(void)
         if (services_pending) {
             esp_err_t ret = start_status_server();
             if (ret == ESP_OK && !s_mdns_started) {
+                log_uplink_heap("pre-mdns-init");
                 esp_err_t mdns_ret = mdns_init();
+                log_uplink_heap(mdns_ret == ESP_OK ? "post-mdns-init-ok" : "post-mdns-init-fail");
                 if (mdns_ret == ESP_OK) {
                     (void)mdns_hostname_set("bandic5");
                     (void)mdns_instance_name_set("C5 Bandit");
