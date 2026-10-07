@@ -51,6 +51,16 @@ static void enter_ota_mode(void)
         esp_restart();
     }
 
+    // A live updater AP + HTTP server is the recovery path rollback is meant
+    // to preserve. Confirm a pending image here so update-mode uploads and a
+    // Wi-Fi-settings reboot cannot accidentally roll this working image back.
+    if (!bandit_ota_confirm_running_image()) {
+        ESP_LOGE(TAG, "unable to confirm running image after OTA recovery started");
+        bandit_ui_set_ota_progress(0, "OTA VERIFY FAILED");
+        vTaskDelay(pdMS_TO_TICKS(2500));
+        esp_restart();
+    }
+
     // The HTTP server owns the updater from here. This task is no longer needed.
     vTaskDelete(NULL);
 }
