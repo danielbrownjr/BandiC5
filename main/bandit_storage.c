@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -189,8 +190,12 @@ esp_err_t bandit_storage_session_path(
     return ESP_OK;
 }
 
-static esp_err_t choose_session_path_locked(void)
+static esp_err_t choose_session_start_index_locked(unsigned *next_index)
 {
+    if (!next_index) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     DIR *dir = opendir(BANDIT_LOG_DIR);
     if (!dir) {
         ESP_LOGE(TAG, "opendir %s failed: %s", BANDIT_LOG_DIR, strerror(errno));
@@ -198,25 +203,32 @@ static esp_err_t choose_session_path_locked(void)
     }
 
     unsigned highest = 0;
+    errno = 0;
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         unsigned index = 0;
         if (parse_session_filename(entry->d_name, &index) && index > highest) {
             highest = index;
         }
+        errno = 0;
     }
+
+    int readdir_errno = errno;
     closedir(dir);
+
+    if (readdir_errno != 0) {
+        ESP_LOGE(TAG, "readdir %s failed: %s", BANDIT_LOG_DIR, strerror(readdir_errno));
+        return ESP_FAIL;
+    }
 
     if (highest >= BANDIT_SESSION_LIMIT) {
         ESP_LOGE(TAG, "session namespace exhausted");
         return ESP_ERR_NO_MEM;
     }
 
-    return bandit_storage_session_path(
-        highest + 1U,
-        s_session_path,
-        sizeof(s_session_path)
-    );
+    *next_index = highest + 1U;
+    return ESP_OK;
 }
 
 static bool csv_formula_prefix_needed(const char *text)
@@ -293,19 +305,61 @@ static esp_err_t start_session_locked(void)
         return ret;
     }
 
-    ret = choose_session_path_locked();
+    unsigned session_index = 0;
+    ret = choose_session_start_index_locked(&session_index);
     if (ret != ESP_OK) {
         teardown_storage_locked(BANDIT_STORAGE_ERROR);
         schedule_retry_locked();
         return ret;
     }
 
-    s_log_file = fopen(s_session_path, "wb");
+    for (; session_index <= BANDIT_SESSION_LIMIT; session_index++) {
+        ret = bandit_storage_session_path(
+            session_index,
+            s_session_path,
+            sizeof(s_session_path)
+        );
+        if (ret != ESP_OK) {
+            teardown_storage_locked(BANDIT_STORAGE_ERROR);
+            schedule_retry_locked();
+            return ret;
+        }
+
+        int fd = open(
+            s_session_path,
+            O_WRONLY | O_CREAT | O_EXCL,
+            0664
+        );
+        if (fd < 0) {
+            if (errno == EEXIST) {
+                continue;
+            }
+
+            ESP_LOGE(TAG, "create %s failed: %s", s_session_path, strerror(errno));
+            teardown_storage_locked(BANDIT_STORAGE_ERROR);
+            schedule_retry_locked();
+            return ESP_FAIL;
+        }
+
+        s_log_file = fdopen(fd, "w");
+        if (!s_log_file) {
+            int fdopen_errno = errno;
+            (void)close(fd);
+            (void)unlink(s_session_path);
+            ESP_LOGE(TAG, "fdopen %s failed: %s", s_session_path, strerror(fdopen_errno));
+            teardown_storage_locked(BANDIT_STORAGE_ERROR);
+            schedule_retry_locked();
+            return ESP_FAIL;
+        }
+
+        break;
+    }
+
     if (!s_log_file) {
-        ESP_LOGE(TAG, "open %s failed: %s", s_session_path, strerror(errno));
+        ESP_LOGE(TAG, "session namespace exhausted");
         teardown_storage_locked(BANDIT_STORAGE_ERROR);
         schedule_retry_locked();
-        return ESP_FAIL;
+        return ESP_ERR_NO_MEM;
     }
 
     if (fputs(
