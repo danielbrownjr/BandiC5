@@ -35,6 +35,7 @@
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
 #define BANDIT_UPLINK_SESSION_LIST_MAX 32
 #define BANDIT_UPLINK_DOWNLOAD_BUFFER 2048
+#define BANDIT_UPLINK_DOWNLOAD_RADIO_WAIT_MS 15000
 
 static const char *TAG = "bandit_uplink";
 
@@ -46,6 +47,7 @@ static bool s_first_attempt_resolved;
 static bool s_services_pending;
 static bool s_state_dirty;
 static bool s_scan_waiting;
+static bool s_download_waiting;
 static char s_ssid[33];
 static char s_ip[16];
 static httpd_handle_t s_server;
@@ -106,7 +108,7 @@ static const char s_status_page[] =
     "<div class='card'><b>TF sessions</b><div class='muted'>Newest 32 sessions; active log may lag by the flush interval.</div>"
     "<div class='logs' id='logs'><span class='muted'>loading...</span></div></div>"
     "<script>"
-    "const $=id=>document.getElementById(id);let transferBusy=false;"
+    "const $=id=>document.getElementById(id);let transferBusy=false,logRetry=0;"
     "function cell(tr,v){const d=document.createElement('td');d.textContent=v;tr.appendChild(d);}"
     "async function tick(){if(transferBusy)return;try{const r=await fetch('/status.json',{cache:'no-store'});const d=await r.json();"
     "$('ver').textContent=d.version;"
@@ -121,14 +123,16 @@ static const char s_status_page[] =
     "cell(tr,a.ssid);cell(tr,a.bssid);cell(tr,a.band);cell(tr,a.channel);cell(tr,a.rssi+' dBm');cell(tr,a.auth);b.appendChild(tr);}"
     "$('apsmeta').textContent='Scan #'+d.scan+' \\u00b7 '+d.aps.length+' shown'+(d.truncated?' \\u00b7 strongest '+d.aps.length+' only':'');"
     "}catch(e){/* retain last complete AP table while HTTP server is busy */}}"
-    "async function refreshLogs(){if(transferBusy)return;const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});const d=await r.json();"
-    "box.replaceChildren();if(!d.available||!d.sessions.length){const s=document.createElement('span');s.className='muted';"
+    "async function refreshLogs(){if(transferBusy)return;const box=$('logs');try{const r=await fetch('/logs.json',{cache:'no-store'});"
+    "if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();clearTimeout(logRetry);logRetry=0;"
+    "box.replaceChildren();box.dataset.good='1';if(!d.available||!d.sessions.length){const s=document.createElement('span');s.className='muted';"
     "s.textContent=d.available?'No sessions found.':'TF card unavailable.';box.appendChild(s);return;}"
     "for(const x of d.sessions){const a=document.createElement(x.active?'span':'button');a.className='log'+(x.active?' active':'');"
     "if(!x.active){a.type='button';a.addEventListener('click',()=>downloadSession(x,a));}"
     "a.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(x.bytes/1024))+' KiB'+(x.active?' \\u00b7 active':'');"
-    "box.appendChild(a);}}catch(e){box.replaceChildren();const s=document.createElement('span');s.className='muted';"
-    "s.textContent='Session list temporarily unavailable';box.appendChild(s);}}"
+    "box.appendChild(a);}}catch(e){if(box.dataset.good!=='1'){box.replaceChildren();const s=document.createElement('span');"
+    "s.className='muted';s.textContent='Session list refresh delayed';box.appendChild(s);}clearTimeout(logRetry);"
+    "logRetry=setTimeout(refreshLogs,1000);}}"
     "async function downloadSession(x,b){if(transferBusy)return;transferBusy=true;b.disabled=true;"
     "const total=x.bytes||0;const totalKiB=Math.max(1,Math.round(total/1024));"
     "const ctl=new AbortController();let kill=0;const arm=()=>{clearTimeout(kill);kill=setTimeout(()=>ctl.abort(),30000);};arm();"
@@ -509,42 +513,52 @@ static esp_err_t download_handler(httpd_req_t *req)
 
     bool connecting;
     bool connected;
-    bool scan_waiting;
     portENTER_CRITICAL(&s_state_mux);
     connecting = s_connecting;
     connected = s_connected;
-    scan_waiting = s_scan_waiting;
+    if (!(connecting && !connected)) {
+        s_download_waiting = true;
+    }
     portEXIT_CRITICAL(&s_state_mux);
 
-    if ((connecting && !connected) || scan_waiting) {
+    if (connecting && !connected) {
         bandit_storage_close_completed_session(reader);
         free(buffer);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "Scout radio busy; retry shortly");
+        return httpd_resp_sendstr(req, "Uplink reconnecting; retry shortly");
     }
 
     if (s_radio_mutex &&
-        xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        xSemaphoreTake(
+            s_radio_mutex,
+            pdMS_TO_TICKS(BANDIT_UPLINK_DOWNLOAD_RADIO_WAIT_MS)
+        ) != pdTRUE) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_download_waiting = false;
+        portEXIT_CRITICAL(&s_state_mux);
         bandit_storage_close_completed_session(reader);
         free(buffer);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "Radio busy; retry shortly");
+        return httpd_resp_sendstr(req, "Scout scan did not yield radio; retry shortly");
     }
 
+    // Once the current scan yields the radio, the mutex itself prevents another
+    // scan from starting while the transfer is active. Clear the queue flag so
+    // a deferred scan can remain first in line after the download completes.
     portENTER_CRITICAL(&s_state_mux);
+    s_download_waiting = false;
     connecting = s_connecting;
     connected = s_connected;
-    scan_waiting = s_scan_waiting;
     portEXIT_CRITICAL(&s_state_mux);
 
-    if ((connecting && !connected) || scan_waiting) {
+    if (connecting && !connected) {
         if (s_radio_mutex) {
             xSemaphoreGive(s_radio_mutex);
         }
         bandit_storage_close_completed_session(reader);
         free(buffer);
         httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "Scout scan pending; retry shortly");
+        return httpd_resp_sendstr(req, "Uplink reconnecting; retry shortly");
     }
 
     char disposition[64];
@@ -976,6 +990,7 @@ esp_err_t bandit_uplink_init(void)
     s_services_pending = false;
     s_state_dirty = true;
     s_scan_waiting = false;
+    s_download_waiting = false;
     s_next_retry_ms = 0;
     s_connect_deadline_ms = 0;
     portEXIT_CRITICAL(&s_state_mux);
@@ -1197,6 +1212,7 @@ void bandit_uplink_stop(void)
     s_services_pending = false;
     s_state_dirty = false;
     s_scan_waiting = false;
+    s_download_waiting = false;
     s_next_retry_ms = 0;
     s_connect_deadline_ms = 0;
     s_ip[0] = '\0';
@@ -1207,13 +1223,15 @@ bool bandit_uplink_try_begin_scan(void)
 {
     bool connecting = false;
     bool connected = false;
+    bool download_waiting = false;
 
     portENTER_CRITICAL(&s_state_mux);
     connecting = s_connecting;
     connected = s_connected;
+    download_waiting = s_download_waiting;
     portEXIT_CRITICAL(&s_state_mux);
 
-    if (connecting && !connected) {
+    if ((connecting && !connected) || download_waiting) {
         portENTER_CRITICAL(&s_state_mux);
         s_scan_waiting = true;
         portEXIT_CRITICAL(&s_state_mux);
@@ -1231,12 +1249,13 @@ bool bandit_uplink_try_begin_scan(void)
     portENTER_CRITICAL(&s_state_mux);
     connecting = s_connecting;
     connected = s_connected;
-    if (!(connecting && !connected)) {
+    download_waiting = s_download_waiting;
+    if (!(connecting && !connected) && !download_waiting) {
         s_scan_waiting = false;
     }
     portEXIT_CRITICAL(&s_state_mux);
 
-    if (connecting && !connected) {
+    if ((connecting && !connected) || download_waiting) {
         if (s_radio_mutex) {
             xSemaphoreGive(s_radio_mutex);
         }
