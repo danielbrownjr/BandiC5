@@ -29,8 +29,8 @@
 #define BANDIT_UPLINK_NVS_SSID "ssid"
 #define BANDIT_UPLINK_NVS_PASSWORD "password"
 #define BANDIT_UPLINK_RETRY_MS 15000
-#define BANDIT_UPLINK_CONNECT_TIMEOUT_MS 3000
-#define BANDIT_UPLINK_DOWNLOAD_MAX_MS 30000
+#define BANDIT_UPLINK_ASSOC_TIMEOUT_MS 12000
+#define BANDIT_UPLINK_DHCP_TIMEOUT_MS 10000
 #define BANDIT_UPLINK_HTTP_STACK 8192
 #define BANDIT_UPLINK_AP_CACHE_MAX 64
 #define BANDIT_UPLINK_SESSION_LIST_MAX 32
@@ -41,14 +41,17 @@ static const char *TAG = "bandit_uplink";
 static volatile bool s_enabled;
 static bool s_connected;
 static bool s_connecting;
+static bool s_associated;
 static bool s_first_attempt_resolved;
 static bool s_services_pending;
 static bool s_state_dirty;
+static bool s_scan_waiting;
 static char s_ssid[33];
 static char s_ip[16];
 static httpd_handle_t s_server;
 static int64_t s_next_retry_ms;
 static int64_t s_connect_deadline_ms;
+static bool s_connect_radio_owned;
 static esp_event_handler_instance_t s_wifi_handler;
 static esp_event_handler_instance_t s_ip_handler;
 static bool s_wifi_handler_registered;
@@ -128,13 +131,13 @@ static const char s_status_page[] =
     "s.textContent='Session list temporarily unavailable';box.appendChild(s);}}"
     "async function downloadSession(x,b){if(transferBusy)return;transferBusy=true;b.disabled=true;"
     "const total=x.bytes||0;const totalKiB=Math.max(1,Math.round(total/1024));"
-    "const ctl=new AbortController(),kill=setTimeout(()=>ctl.abort(),30000);"
+    "const ctl=new AbortController();let kill=0;const arm=()=>{clearTimeout(kill);kill=setTimeout(()=>ctl.abort(),30000);};arm();"
     "try{b.textContent=x.name+' \\u00b7 starting...';const r=await fetch('/download?session='+x.index,{cache:'no-store',signal:ctl.signal});"
     "if(!r.ok)throw new Error('HTTP '+r.status);let blob;"
     "if(r.body&&r.body.getReader){const rd=r.body.getReader(),parts=[];let got=0;"
-    "while(true){const q=await rd.read();if(q.done)break;parts.push(q.value);got+=q.value.byteLength;"
+    "while(true){const q=await rd.read();if(q.done)break;arm();parts.push(q.value);got+=q.value.byteLength;"
     "b.textContent=x.name+' \\u00b7 '+Math.max(1,Math.round(got/1024))+'/'+totalKiB+' KiB';}"
-    "blob=new Blob(parts,{type:'text/csv;charset=utf-8'});}else{blob=await r.blob();}"
+    "blob=new Blob(parts,{type:'text/csv;charset=utf-8'});}else{clearTimeout(kill);blob=await r.blob();}"
     "if(total&&blob.size!==total)throw new Error('size mismatch');"
     "const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=x.name;document.body.appendChild(a);a.click();a.remove();"
     "setTimeout(()=>URL.revokeObjectURL(u),5000);b.textContent=x.name+' \\u00b7 downloaded';"
@@ -478,19 +481,6 @@ static esp_err_t download_handler(httpd_req_t *req)
         return ESP_ERR_INVALID_ARG;
     }
 
-    char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
-    if (!buffer) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
-        return ESP_ERR_NO_MEM;
-    }
-
-    if (s_radio_mutex &&
-        xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(15000)) != pdTRUE) {
-        free(buffer);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_sendstr(req, "Radio busy; try the download again");
-    }
-
     bandit_storage_reader_t *reader = NULL;
     size_t file_size = 0;
     esp_err_t ret = bandit_storage_open_completed_session(
@@ -499,11 +489,6 @@ static esp_err_t download_handler(httpd_req_t *req)
         &file_size
     );
     if (ret != ESP_OK) {
-        if (s_radio_mutex) {
-            xSemaphoreGive(s_radio_mutex);
-        }
-        free(buffer);
-
         if (ret == ESP_ERR_NOT_FOUND) {
             httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Session not found");
         } else if (ret == ESP_ERR_INVALID_STATE) {
@@ -513,6 +498,53 @@ static esp_err_t download_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to open session");
         }
         return ret;
+    }
+
+    char *buffer = malloc(BANDIT_UPLINK_DOWNLOAD_BUFFER);
+    if (!buffer) {
+        bandit_storage_close_completed_session(reader);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    bool connecting;
+    bool connected;
+    bool scan_waiting;
+    portENTER_CRITICAL(&s_state_mux);
+    connecting = s_connecting;
+    connected = s_connected;
+    scan_waiting = s_scan_waiting;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if ((connecting && !connected) || scan_waiting) {
+        bandit_storage_close_completed_session(reader);
+        free(buffer);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Scout radio busy; retry shortly");
+    }
+
+    if (s_radio_mutex &&
+        xSemaphoreTake(s_radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        bandit_storage_close_completed_session(reader);
+        free(buffer);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Radio busy; retry shortly");
+    }
+
+    portENTER_CRITICAL(&s_state_mux);
+    connecting = s_connecting;
+    connected = s_connected;
+    scan_waiting = s_scan_waiting;
+    portEXIT_CRITICAL(&s_state_mux);
+
+    if ((connecting && !connected) || scan_waiting) {
+        if (s_radio_mutex) {
+            xSemaphoreGive(s_radio_mutex);
+        }
+        bandit_storage_close_completed_session(reader);
+        free(buffer);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return httpd_resp_sendstr(req, "Scout scan pending; retry shortly");
     }
 
     char disposition[64];
@@ -530,17 +562,8 @@ static esp_err_t download_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-BandiC5-File-Size", size_header);
 
-    const int64_t started_ms = esp_timer_get_time() / 1000;
     size_t total_sent = 0;
-
     while (total_sent < file_size) {
-        if ((esp_timer_get_time() / 1000) - started_ms >
-            BANDIT_UPLINK_DOWNLOAD_MAX_MS) {
-            ESP_LOGW(TAG, "download timed out: session=%04lu", parsed);
-            ret = ESP_ERR_TIMEOUT;
-            break;
-        }
-
         size_t remaining = file_size - total_sent;
         size_t request = remaining < BANDIT_UPLINK_DOWNLOAD_BUFFER
             ? remaining
@@ -682,15 +705,29 @@ static void wifi_event_handler(
     (void)event_base;
     (void)event_data;
 
-    if (!s_enabled || event_id != WIFI_EVENT_STA_DISCONNECTED) {
+    if (!s_enabled) {
         return;
     }
 
     const int64_t current_ms = esp_timer_get_time() / 1000;
 
+    if (event_id == WIFI_EVENT_STA_CONNECTED) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_associated = true;
+        s_connecting = true;
+        s_connect_deadline_ms = current_ms + BANDIT_UPLINK_DHCP_TIMEOUT_MS;
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
+    }
+
+    if (event_id != WIFI_EVENT_STA_DISCONNECTED) {
+        return;
+    }
+
     portENTER_CRITICAL(&s_state_mux);
     s_connected = false;
     s_connecting = false;
+    s_associated = false;
     s_first_attempt_resolved = true;
     s_services_pending = false;
     s_state_dirty = true;
@@ -721,10 +758,11 @@ static void ip_event_handler(
         portENTER_CRITICAL(&s_state_mux);
         s_connected = true;
         s_connecting = false;
+        s_associated = true;
         s_first_attempt_resolved = true;
         s_services_pending = true;
         s_state_dirty = true;
-        snprintf(s_ip, sizeof(s_ip), "%s", ip);
+        memcpy(s_ip, ip, sizeof(s_ip));
         portEXIT_CRITICAL(&s_state_mux);
         return;
     }
@@ -734,12 +772,13 @@ static void ip_event_handler(
 
         portENTER_CRITICAL(&s_state_mux);
         s_connected = false;
-        s_connecting = false;
+        s_connecting = true;
+        s_associated = true;
         s_first_attempt_resolved = true;
         s_services_pending = false;
         s_state_dirty = true;
         s_ip[0] = '\0';
-        s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
+        s_connect_deadline_ms = current_ms + BANDIT_UPLINK_DHCP_TIMEOUT_MS;
         portEXIT_CRITICAL(&s_state_mux);
     }
 }
@@ -882,7 +921,7 @@ esp_err_t bandit_uplink_init(void)
 
     ret = esp_event_handler_instance_register(
         WIFI_EVENT,
-        WIFI_EVENT_STA_DISCONNECTED,
+        ESP_EVENT_ANY_ID,
         wifi_event_handler,
         NULL,
         &s_wifi_handler
@@ -902,7 +941,7 @@ esp_err_t bandit_uplink_init(void)
     if (ret != ESP_OK) {
         esp_event_handler_instance_unregister(
             WIFI_EVENT,
-            WIFI_EVENT_STA_DISCONNECTED,
+            ESP_EVENT_ANY_ID,
             s_wifi_handler
         );
         s_wifi_handler_registered = false;
@@ -924,9 +963,11 @@ esp_err_t bandit_uplink_init(void)
     s_ip[0] = '\0';
     s_connected = false;
     s_connecting = false;
+    s_associated = false;
     s_first_attempt_resolved = false;
     s_services_pending = false;
     s_state_dirty = true;
+    s_scan_waiting = false;
     s_next_retry_ms = 0;
     s_connect_deadline_ms = 0;
     portEXIT_CRITICAL(&s_state_mux);
@@ -948,8 +989,10 @@ void bandit_uplink_service(void)
     const int64_t current_ms = esp_timer_get_time() / 1000;
     bool connected;
     bool connecting;
+    bool associated;
     bool state_dirty;
     bool services_pending;
+    bool scan_waiting;
     int64_t next_retry_ms;
     int64_t connect_deadline_ms;
     char ssid[33];
@@ -958,8 +1001,10 @@ void bandit_uplink_service(void)
     portENTER_CRITICAL(&s_state_mux);
     connected = s_connected;
     connecting = s_connecting;
+    associated = s_associated;
     state_dirty = s_state_dirty;
     services_pending = s_services_pending;
+    scan_waiting = s_scan_waiting;
     next_retry_ms = s_next_retry_ms;
     connect_deadline_ms = s_connect_deadline_ms;
     memcpy(ssid, s_ssid, sizeof(ssid));
@@ -968,12 +1013,19 @@ void bandit_uplink_service(void)
     s_services_pending = false;
     portEXIT_CRITICAL(&s_state_mux);
 
+    if (s_connect_radio_owned && (!connecting || connected)) {
+        xSemaphoreGive(s_radio_mutex);
+        s_connect_radio_owned = false;
+    }
+
     if (state_dirty) {
         bandit_ui_set_uplink_state(true, connected);
         bandit_ui_set_uplink_address(connected ? ip : NULL);
 
         if (connected) {
             ESP_LOGI(TAG, "uplink connected: SSID=%s IP=%s hostname=bandic5", ssid, ip);
+        } else if (connecting) {
+            ESP_LOGI(TAG, "uplink connection in progress");
         } else {
             ESP_LOGW(TAG, "uplink disconnected; reconnect scheduled between scans");
         }
@@ -1006,19 +1058,37 @@ void bandit_uplink_service(void)
     }
 
     if (connecting) {
+        if (!s_connect_radio_owned) {
+            if (!s_radio_mutex ||
+                xSemaphoreTake(s_radio_mutex, 0) != pdTRUE) {
+                return;
+            }
+            s_connect_radio_owned = true;
+        }
+
         if (current_ms < connect_deadline_ms) {
             return;
         }
 
-        ESP_LOGW(TAG, "uplink connect attempt timed out; returning radio to scout");
+        ESP_LOGW(
+            TAG,
+            "uplink %s timed out; returning radio to scout",
+            associated ? "DHCP" : "association"
+        );
         (void)esp_wifi_disconnect();
 
         portENTER_CRITICAL(&s_state_mux);
         s_connecting = false;
+        s_associated = false;
         s_first_attempt_resolved = true;
         s_state_dirty = true;
         s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
         portEXIT_CRITICAL(&s_state_mux);
+
+        if (s_connect_radio_owned) {
+            xSemaphoreGive(s_radio_mutex);
+            s_connect_radio_owned = false;
+        }
         return;
     }
 
@@ -1026,21 +1096,42 @@ void bandit_uplink_service(void)
         return;
     }
 
+    // Once a scan has been deferred, let it run before beginning another
+    // connection attempt.
+    if (scan_waiting) {
+        return;
+    }
+
+    if (!s_radio_mutex ||
+        xSemaphoreTake(s_radio_mutex, 0) != pdTRUE) {
+        return;
+    }
+    s_connect_radio_owned = true;
+
+    // Publish CONNECTING before calling into the asynchronous Wi-Fi driver so a
+    // very fast GOT_IP event cannot be overwritten by the caller afterwards.
+    portENTER_CRITICAL(&s_state_mux);
+    s_connecting = true;
+    s_associated = false;
+    s_connect_deadline_ms = current_ms + BANDIT_UPLINK_ASSOC_TIMEOUT_MS;
+    portEXIT_CRITICAL(&s_state_mux);
+
     esp_err_t ret = esp_wifi_connect();
     if (ret == ESP_OK || ret == ESP_ERR_WIFI_STATE) {
-        portENTER_CRITICAL(&s_state_mux);
-        s_connecting = true;
-        s_connect_deadline_ms = current_ms + BANDIT_UPLINK_CONNECT_TIMEOUT_MS;
-        portEXIT_CRITICAL(&s_state_mux);
         return;
     }
 
     ESP_LOGD(TAG, "uplink connect attempt failed immediately: %s", esp_err_to_name(ret));
+
     portENTER_CRITICAL(&s_state_mux);
     s_connecting = false;
+    s_associated = false;
     s_first_attempt_resolved = true;
     s_next_retry_ms = current_ms + BANDIT_UPLINK_RETRY_MS;
     portEXIT_CRITICAL(&s_state_mux);
+
+    xSemaphoreGive(s_radio_mutex);
+    s_connect_radio_owned = false;
 }
 
 void bandit_uplink_stop(void)
@@ -1050,7 +1141,7 @@ void bandit_uplink_stop(void)
     if (s_wifi_handler_registered) {
         esp_event_handler_instance_unregister(
             WIFI_EVENT,
-            WIFI_EVENT_STA_DISCONNECTED,
+            ESP_EVENT_ANY_ID,
             s_wifi_handler
         );
         s_wifi_handler_registered = false;
@@ -1063,6 +1154,11 @@ void bandit_uplink_stop(void)
             s_ip_handler
         );
         s_ip_handler_registered = false;
+    }
+
+    if (s_connect_radio_owned && s_radio_mutex) {
+        xSemaphoreGive(s_radio_mutex);
+        s_connect_radio_owned = false;
     }
 
     if (s_server) {
@@ -1081,9 +1177,11 @@ void bandit_uplink_stop(void)
     portENTER_CRITICAL(&s_state_mux);
     s_connected = false;
     s_connecting = false;
+    s_associated = false;
     s_first_attempt_resolved = true;
     s_services_pending = false;
     s_state_dirty = false;
+    s_scan_waiting = false;
     s_next_retry_ms = 0;
     s_connect_deadline_ms = 0;
     s_ip[0] = '\0';
@@ -1093,28 +1191,43 @@ void bandit_uplink_stop(void)
 bool bandit_uplink_try_begin_scan(void)
 {
     bool connecting = false;
+    bool connected = false;
 
     portENTER_CRITICAL(&s_state_mux);
     connecting = s_connecting;
+    connected = s_connected;
     portEXIT_CRITICAL(&s_state_mux);
 
-    if (connecting) {
+    if (connecting && !connected) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_scan_waiting = true;
+        portEXIT_CRITICAL(&s_state_mux);
         return false;
     }
 
     if (s_radio_mutex &&
         xSemaphoreTake(s_radio_mutex, 0) != pdTRUE) {
+        portENTER_CRITICAL(&s_state_mux);
+        s_scan_waiting = true;
+        portEXIT_CRITICAL(&s_state_mux);
         return false;
     }
 
     portENTER_CRITICAL(&s_state_mux);
     connecting = s_connecting;
+    connected = s_connected;
+    if (!(connecting && !connected)) {
+        s_scan_waiting = false;
+    }
     portEXIT_CRITICAL(&s_state_mux);
 
-    if (connecting) {
+    if (connecting && !connected) {
         if (s_radio_mutex) {
             xSemaphoreGive(s_radio_mutex);
         }
+        portENTER_CRITICAL(&s_state_mux);
+        s_scan_waiting = true;
+        portEXIT_CRITICAL(&s_state_mux);
         return false;
     }
 
@@ -1129,7 +1242,6 @@ void bandit_uplink_end_scan(void)
         xSemaphoreGive(s_radio_mutex);
     }
 }
-
 
 bool bandit_uplink_first_attempt_resolved(void)
 {
