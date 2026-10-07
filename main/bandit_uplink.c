@@ -564,6 +564,12 @@ static esp_err_t download_handler(httpd_req_t *req)
 
     size_t total_sent = 0;
     while (total_sent < file_size) {
+        if (!s_enabled) {
+            ESP_LOGI(TAG, "download cancelled because uplink is stopping");
+            ret = ESP_ERR_INVALID_STATE;
+            break;
+        }
+
         size_t remaining = file_size - total_sent;
         size_t request = remaining < BANDIT_UPLINK_DOWNLOAD_BUFFER
             ? remaining
