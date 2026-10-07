@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 
 #define BANDIT_LOG_DIR BSP_SD_MOUNT_POINT "/bandic5"
@@ -39,6 +40,23 @@ static bool s_unmount_pending;
 static unsigned s_reader_count;
 static int64_t s_next_retry_ms;
 static SemaphoreHandle_t s_mutex;
+
+static void log_storage_heap_locked(const char *where)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGI(
+        TAG,
+        "HEAP %s free=%u min=%u largest=%u state=%d mounted=%d pending=%d readers=%u",
+        where ? where : "?",
+        (unsigned)heap_caps_get_free_size(caps),
+        (unsigned)heap_caps_get_minimum_free_size(caps),
+        (unsigned)heap_caps_get_largest_free_block(caps),
+        (int)s_state,
+        s_mounted ? 1 : 0,
+        s_unmount_pending ? 1 : 0,
+        s_reader_count
+    );
+}
 
 static int64_t now_ms(void)
 {
@@ -86,7 +104,9 @@ static void unmount_now_locked(void)
         return;
     }
 
+    log_storage_heap_locked("pre-unmount");
     esp_err_t ret = bsp_sdcard_unmount();
+    log_storage_heap_locked(ret == ESP_OK ? "post-unmount-ok" : "post-unmount-fail");
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "TF unmount returned %s", esp_err_to_name(ret));
     }
@@ -132,7 +152,9 @@ static void teardown_storage_locked(bandit_storage_state_t next_state)
 static void set_error_locked(const char *reason)
 {
     ESP_LOGE(TAG, "%s", reason ? reason : "storage error");
+    log_storage_heap_locked("storage-error-pre-teardown");
     teardown_storage_locked(BANDIT_STORAGE_ERROR);
+    log_storage_heap_locked("storage-error-post-teardown");
     schedule_retry_locked();
 }
 
@@ -289,7 +311,9 @@ static esp_err_t start_session_locked(void)
         }
     }
 
+    log_storage_heap_locked("pre-mount");
     esp_err_t ret = bsp_sdcard_mount();
+    log_storage_heap_locked(ret == ESP_OK ? "post-mount-ok" : "post-mount-fail");
     if (ret != ESP_OK) {
         s_state = BANDIT_STORAGE_NO_CARD;
         s_session_path[0] = '\0';
@@ -379,6 +403,7 @@ static esp_err_t start_session_locked(void)
     s_scans_since_flush = 0;
     s_state = BANDIT_STORAGE_READY;
     s_next_retry_ms = 0;
+    log_storage_heap_locked("session-ready");
 
     ESP_LOGI(TAG, "logging to %s", s_session_path);
     return ESP_OK;
