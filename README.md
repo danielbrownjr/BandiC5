@@ -277,6 +277,53 @@ manually framed response.
 
 The branch `release/v0.3.1` points at the exact physically validated v0.3.1 mainline commit. The connected GitHub tooling used for this project can mutate branches/PRs but does not expose Git tag/release-asset creation, so this branch is the durable recovery pointer until a GitHub Release/tag is created separately.
 
+## v0.4.5 static RC
+
+This pass addresses the three merge blockers found by the adversarial re-review
+of v0.4.4, plus several small safety fixes that were cheap to close before
+hardware testing.
+
+### Uplink connection state
+
+- association/discovery now has a 15-second window instead of a 3-second total
+  connect deadline
+- `WIFI_EVENT_STA_CONNECTED` starts a separate 10-second DHCP window
+- the CONNECTING state is published before `esp_wifi_connect()`, so an
+  unusually fast GOT_IP event cannot be overwritten by the caller
+- connect attempts now own the same radio mutex as scans and downloads for the
+  asynchronous attempt lifetime
+- LOST_IP is treated as a DHCP-recovery state instead of immediately issuing a
+  second connect while still associated
+- a deferred scout scan gets priority before another connect or download starts
+
+### Completed-session downloads
+
+- the 30-second total transfer cap is removed
+- ESP-IDF's configured socket send timeout remains the server-side stalled-client
+  bound
+- the browser's 30-second timer is now inactivity-based and is re-armed whenever
+  a stream chunk arrives
+- completed sessions are validated/opened before attempting to reserve the radio
+- downloads back off when a scout scan is already waiting
+- the radio wait for a download is capped at one second
+
+### OTA rollback interaction
+
+A pending OTA image is confirmed after the update AP and updater HTTP server
+successfully start. That recovery path is sufficient evidence to make update
+mode usable: a second firmware upload and a Wi-Fi-settings reboot can no longer
+be rejected or silently roll the new image back during its normal health window.
+
+Normal scout-mode confirmation is still delayed until a successful scan/publish,
+the healthy-runtime window, and first uplink-attempt resolution.
+
+### Session creation safety
+
+- directory enumeration errors are distinguished from normal end-of-directory
+- new session files are created with exclusive-create semantics
+- a case-variant or otherwise previously missed filename cannot be silently
+  truncated by opening it with create-always behavior
+
 ## v0.4.4 hardening RC
 
 This release-candidate pass follows an adversarial whole-repository review and
