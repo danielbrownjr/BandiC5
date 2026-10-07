@@ -306,6 +306,8 @@ hardware testing.
 - completed sessions are validated/opened before attempting to reserve the radio
 - downloads back off when a scout scan is already waiting
 - the radio wait for a download is capped at one second
+- an in-flight download exits at the next chunk boundary when uplink shutdown
+  begins, so BOOT/OTA entry is not forced to wait for a healthy long transfer
 
 ### OTA rollback interaction
 
@@ -313,6 +315,8 @@ A pending OTA image is confirmed after the update AP and updater HTTP server
 successfully start. That recovery path is sufficient evidence to make update
 mode usable: a second firmware upload and a Wi-Fi-settings reboot can no longer
 be rejected or silently roll the new image back during its normal health window.
+Both POST handlers also confirm defensively, closing the tiny race between the
+HTTP server accepting its first request and the control task's post-start check.
 
 Normal scout-mode confirmation is still delayed until a successful scan/publish,
 the healthy-runtime window, and first uplink-attempt resolution.
